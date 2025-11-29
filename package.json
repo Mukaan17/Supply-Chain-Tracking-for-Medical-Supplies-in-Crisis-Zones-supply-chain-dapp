@@ -3,11 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@sentry/react": "^7.91.0",
     "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.8.0",
-    "@testing-library/react": "^16.3.0",
-    "@testing-library/user-event": "^13.5.0",
     "ethers": "^6.15.0",
+    "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-scripts": "5.0.1",
@@ -17,7 +16,21 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "test:coverage": "react-scripts test --coverage --watchAll=false",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "eject": "react-scripts eject",
+    "lint": "eslint src --ext .js,.jsx",
+    "lint:fix": "eslint src --ext .js,.jsx --fix",
+    "format": "prettier --write \"src/**/*.{js,jsx,json,css,md}\"",
+    "format:check": "prettier --check \"src/**/*.{js,jsx,json,css,md}\"",
+    "audit:security": "npm audit --audit-level=moderate",
+    "audit:fix": "npm audit fix",
+    "audit:production": "npm audit --production --audit-level=high",
+    "security:scan": "npm audit --audit-level=moderate && npm run lint",
+    "analyze": "npm run build && npx source-map-explorer 'build/static/js/*.js'",
+    "lighthouse": "lighthouse http://localhost:3000 --output html --output-path ./lighthouse-report.html",
+    "type-check": "tsc --noEmit || true"
   },
   "eslintConfig": {
     "extends": [
@@ -36,5 +49,13 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.11.0",
+    "@playwright/test": "^1.57.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "identity-obj-proxy": "^3.0.0"
   }
 }
