@@ -171,7 +171,7 @@ class CacheService {
   /**
    * Persist to IndexedDB (internal)
    */
-  async _persistToIndexedDB(key, value) {
+  async _persistToIndexedDB(key, _value) {
     // Implementation would use IndexedDB wrapper
     // For now, just log
     logger.debug('Persisting to IndexedDB', { key });

@@ -4,7 +4,7 @@
  * Manages contract addresses per network and ABI loading.
  */
 
-import contractABI from '../../contract-abi.json';
+import contractABI from './contract-abi.json';
 
 // Contract addresses per network
 // These should be set via environment variables in production

@@ -5,6 +5,8 @@
  * @Last Modified time: 2025-09-11 19:08:36
  */
 import React, { useState, useEffect, useRef } from 'react';
+import PropTypes from 'prop-types';
+import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import PackageHistory from './PackageHistory';
 import PackageSearch from './PackageSearch';
 import QRCodeGenerator from './QRCodeGenerator';
@@ -15,8 +17,8 @@ import { sanitizePackageId, sanitizeAddress } from '../utils/sanitization';
 import logger from '../services/logging';
 import errorTracking from '../services/errorTracking';
 import { handleError } from '../utils/errorHandler';
-import { useTransaction } from '../hooks/useTransaction';
-import { retry } from '../utils/retry';
+import { useContractAddress } from '../hooks/useContract';
+import { getContractABI } from '../config/contracts';
 
 const STATUS_LABELS = {
   0: 'Created',
@@ -24,19 +26,86 @@ const STATUS_LABELS = {
   2: 'Delivered',
 };
 
-export default function PackageTracker({ contract, account, provider, network }) {
+export default function PackageTracker({ contract, account, network }) {
   const [queryId, setQueryId] = useState('');
   const [data, setData] = useState(null);
   const [txMsg, setTxMsg] = useState('');
   const [transferTo, setTransferTo] = useState('');
   const [validationErrors, setValidationErrors] = useState({});
   const [loading, setLoading] = useState(false);
+  const [packageIdToFetch, setPackageIdToFetch] = useState(null);
   const detailsRef = useRef(null);
-  const { submitTransaction, estimateGas } = useTransaction();
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
+  
+  const { writeContract, isPending: isWriting, data: writeData } = useWriteContract();
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
+    hash: writeData,
+  });
+  
+  // Use wagmi's useReadContract for fetching package details
+  const { data: packageData, isLoading: isReading, error: readError, refetch } = useReadContract({
+    address: packageIdToFetch ? contractAddress : undefined,
+    abi,
+    functionName: 'getPackageDetails',
+    args: packageIdToFetch ? [BigInt(packageIdToFetch)] : undefined,
+    query: {
+      enabled: !!packageIdToFetch && !!contractAddress,
+    },
+  });
+
+  // Track if component is mounted to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  // Update data when packageData changes
+  useEffect(() => {
+    if (packageData && packageData.length >= 7) {
+      const [id, description, creator, currentOwner, status, createdAt, lastUpdatedAt] = packageData;
+      setData({
+        id: id.toString(),
+        description,
+        creator,
+        currentOwner,
+        status: typeof status === 'bigint' ? Number(status) : Number(status),
+        createdAt: createdAt ? (typeof createdAt === 'bigint' ? Number(createdAt) : Number(createdAt)) : null,
+        lastUpdatedAt: lastUpdatedAt ? (typeof lastUpdatedAt === 'bigint' ? Number(lastUpdatedAt) : Number(lastUpdatedAt)) : null,
+      });
+      setLoading(false);
+      logger.info('Package details fetched', { packageId: id.toString() });
+    }
+    if (readError) {
+      const errorInfo = handleError(readError, {
+        component: 'PackageTracker',
+        action: 'fetchDetails',
+      });
+      logger.error('Failed to fetch package details', readError);
+      setData(null);
+      setValidationErrors({ packageId: errorInfo.message || 'Package not found or invalid ID' });
+      setLoading(false);
+    }
+  }, [packageData, readError]);
+
+  // Refetch package data after successful transaction
+  useEffect(() => {
+    if (isConfirmed && writeData && data?.id) {
+      setPackageIdToFetch(data.id);
+      setTimeout(() => refetch(), 1000);
+    }
+  }, [isConfirmed, writeData, data?.id, refetch]);
 
   const fetchDetails = async (e) => {
     e.preventDefault();
-    if (!contract) return;
+    if (!contractAddress) {
+      setValidationErrors({ packageId: 'Contract not ready' });
+      return;
+    }
     
     // Validate package ID
     const idError = validatePackageId(queryId);
@@ -46,75 +115,37 @@ export default function PackageTracker({ contract, account, provider, network })
     }
     setValidationErrors({});
     
-    try {
-      setLoading(true);
-      const sanitizedId = sanitizePackageId(queryId);
-      if (!sanitizedId) {
-        setValidationErrors({ packageId: 'Invalid package ID' });
-        return;
-      }
-
-      const res = await retry(
-        () => contract.getPackageDetails(sanitizedId),
-        { maxAttempts: 3 }
-      );
-      
-      setData({
-        id: res[0].toString(),
-        description: res[1],
-        creator: res[2],
-        currentOwner: res[3],
-        status: Number(res[4]),
-        createdAt: res[5] ? Number(res[5]) : null,
-        lastUpdatedAt: res[6] ? Number(res[6]) : null,
-      });
-      
-      logger.info('Package details fetched', { packageId: sanitizedId });
-    } catch (err) {
-      const errorInfo = handleError(err, {
-        component: 'PackageTracker',
-        action: 'fetchDetails',
-      });
-      logger.error('Failed to fetch package details', err, { packageId: queryId });
-      errorTracking.captureException(err, {
-        tags: { component: 'PackageTracker' },
-      });
-      setData(null);
-      setValidationErrors({ packageId: errorInfo.message || 'Package not found or invalid ID' });
-    } finally {
-      setLoading(false);
+    const sanitizedId = sanitizePackageId(queryId);
+    if (!sanitizedId) {
+      setValidationErrors({ packageId: 'Invalid package ID' });
+      return;
     }
+
+    setLoading(true);
+    setPackageIdToFetch(sanitizedId);
+    // Trigger refetch
+    setTimeout(() => refetch(), 100);
   };
 
   // Fetch details by a given packageId without altering the input value
   const fetchDetailsById = async (packageId) => {
-    if (!contract) return;
+    if (!contractAddress) return;
     try {
       setLoading(true);
-      logger.debug('Fetching package details', { packageId, contractAddress: contract.target });
+      logger.debug('Fetching package details', { packageId, contractAddress });
       
       const sanitizedId = sanitizePackageId(packageId);
       if (!sanitizedId) {
-        setValidationErrors({ packageId: 'Invalid package ID' });
+        if (isMountedRef.current) {
+          setValidationErrors({ packageId: 'Invalid package ID' });
+        }
+        setLoading(false);
         return;
       }
 
-      const res = await retry(
-        () => contract.getPackageDetails(sanitizedId),
-        { maxAttempts: 3 }
-      );
-      
-      setData({
-        id: res[0].toString(),
-        description: res[1],
-        creator: res[2],
-        currentOwner: res[3],
-        status: Number(res[4]),
-        createdAt: res[5] ? Number(res[5]) : null,
-        lastUpdatedAt: res[6] ? Number(res[6]) : null,
-      });
-      setValidationErrors({});
-      logger.info('Package details fetched successfully', { packageId: sanitizedId });
+      setPackageIdToFetch(sanitizedId);
+      // Trigger refetch - data will be updated via useEffect when packageData changes
+      setTimeout(() => refetch(), 100);
     } catch (err) {
       const errorInfo = handleError(err, {
         component: 'PackageTracker',
@@ -124,14 +155,12 @@ export default function PackageTracker({ contract, account, provider, network })
       errorTracking.captureException(err, {
         tags: { component: 'PackageTracker' },
       });
-      setData(null);
+      setLoading(false);
       if (err.message && err.message.includes('Package does not exist')) {
         setValidationErrors({ packageId: `Package #${packageId} does not exist on this contract` });
       } else {
         setValidationErrors({ packageId: errorInfo.message || 'Failed to fetch package details' });
       }
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -165,15 +194,15 @@ export default function PackageTracker({ contract, account, provider, network })
       setTxMsg('Awaiting confirmation...');
       logger.info('Initiating package transfer', { packageId: idNum, to: sanitizedAddress });
       
-      const txPromise = contract.transferOwnership(idNum, sanitizedAddress);
-      await submitTransaction(txPromise, {
-        method: 'transferOwnership',
-        params: { packageId: idNum, newOwner: sanitizedAddress },
-        description: `Transfer package #${idNum} to ${sanitizedAddress.slice(0, 6)}...${sanitizedAddress.slice(-4)}`,
+      writeContract({
+        address: contractAddress,
+        abi,
+        functionName: 'transferOwnership',
+        args: [BigInt(idNum), sanitizedAddress],
       });
       
       setTxMsg('✅ Package transferred successfully');
-      await fetchDetailsById(idNum);
+      // Refetch will happen via useEffect when writeData changes
     } catch (err) {
       const errorInfo = handleError(err, {
         component: 'PackageTracker',
@@ -188,7 +217,7 @@ export default function PackageTracker({ contract, account, provider, network })
   };
 
   const doDeliver = async () => {
-    if (!contract) return;
+    if (!contractAddress) return;
     // Pick the active package id (prefer loaded data.id)
     const activeId = data?.id ?? queryId;
     const idNum = Number(activeId);
@@ -206,15 +235,14 @@ export default function PackageTracker({ contract, account, provider, network })
       setTxMsg('Awaiting confirmation...');
       logger.info('Marking package as delivered', { packageId: idNum });
       
-      const txPromise = contract.markAsDelivered(idNum);
-      await submitTransaction(txPromise, {
-        method: 'markAsDelivered',
-        params: { packageId: idNum },
-        description: `Mark package #${idNum} as delivered`,
+      writeContract({
+        address: contractAddress,
+        abi,
+        functionName: 'markAsDelivered',
+        args: [BigInt(idNum)],
       });
       
       setTxMsg('✅ Package marked as delivered');
-      await fetchDetailsById(idNum);
       logger.info('Package marked as delivered', { packageId: idNum });
     } catch (err) {
       const errorInfo = handleError(err, {
@@ -230,7 +258,7 @@ export default function PackageTracker({ contract, account, provider, network })
   };
 
   const doMarkInTransit = async () => {
-    if (!contract) return;
+    if (!contractAddress) return;
     // Pick the active package id (prefer loaded data.id)
     const activeId = data?.id ?? queryId;
     const idNum = Number(activeId);
@@ -248,15 +276,14 @@ export default function PackageTracker({ contract, account, provider, network })
       setTxMsg('Awaiting confirmation...');
       logger.info('Marking package as in transit', { packageId: idNum });
       
-      const txPromise = contract.markAsInTransit(idNum);
-      await submitTransaction(txPromise, {
-        method: 'markAsInTransit',
-        params: { packageId: idNum },
-        description: `Mark package #${idNum} as in transit`,
+      writeContract({
+        address: contractAddress,
+        abi,
+        functionName: 'markAsInTransit',
+        args: [BigInt(idNum)],
       });
       
       setTxMsg('✅ Package marked as in transit');
-      await fetchDetailsById(idNum);
     } catch (err) {
       const errorInfo = handleError(err, {
         component: 'PackageTracker',
@@ -291,7 +318,7 @@ export default function PackageTracker({ contract, account, provider, network })
     <div>
       <h2>Track Package</h2>
       
-      <PackageSearch contract={contract} onPackageSelect={handlePackageSelect} />
+      <PackageSearch contract={contract} onPackageSelect={handlePackageSelect} account={account} />
       
       <form onSubmit={fetchDetails} style={{ display: 'flex', gap: 8, flexDirection: 'column' }}>
         <div>
@@ -362,105 +389,152 @@ export default function PackageTracker({ contract, account, provider, network })
               <p><strong>Description:</strong> {data.description}</p>
               <p><strong>Creator:</strong> {data.creator}</p>
               <p><strong>Current Owner:</strong> {data.currentOwner}</p>
+              {data.createdAt && (
+                <p><strong>Created:</strong> {new Date(data.createdAt * 1000).toLocaleString()}</p>
+              )}
+              {data.lastUpdatedAt && (
+                <p><strong>Last Updated:</strong> {new Date(data.lastUpdatedAt * 1000).toLocaleString()}</p>
+              )}
             </div>
           </div>
 
-          {account && data.currentOwner && account.toLowerCase() === data.currentOwner.toLowerCase() && (
+          {account && data.currentOwner && (
             <div style={{
-              backgroundColor: '#e7f3ff',
-              border: '1px solid #b3d9ff',
+              backgroundColor: account.toLowerCase() === data.currentOwner.toLowerCase() ? '#e7f3ff' : '#fff3cd',
+              border: account.toLowerCase() === data.currentOwner.toLowerCase() ? '1px solid #b3d9ff' : '1px solid #ffc107',
               borderRadius: 8,
               padding: 16,
               marginBottom: 16
             }}>
-              <h3 style={{ marginTop: 0, color: '#004085' }}>⚡ Owner Actions</h3>
-              <div style={{ marginBottom: 16 }}>
-                <input
-                  type="text"
-                  placeholder="New owner address (0x...)"
-                  value={transferTo}
-                  onChange={(e) => {
-                    setTransferTo(e.target.value);
-                    setValidationErrors({}); // Clear validation error on change
-                  }}
-                  style={{ 
-                    width: '100%', 
-                    padding: 12, 
-                    border: validationErrors.transferAddress ? '2px solid #dc3545' : '1px solid #ccc',
-                    borderRadius: 4,
-                    fontSize: '16px',
-                    marginBottom: 8
-                  }}
-                />
-                {validationErrors.transferAddress && (
-                  <div style={{ color: '#dc3545', fontSize: '14px', marginBottom: 12 }}>
-                    {validationErrors.transferAddress}
-                  </div>
-                )}
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <button 
-                    onClick={doTransfer}
-                    style={{
-                      backgroundColor: '#28a745',
-                      color: 'white',
-                      border: 'none',
-                      padding: '12px 24px',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                      fontSize: '16px',
-                      fontWeight: 'bold'
+              <h3 style={{ marginTop: 0, color: '#004085' }}>
+                {account.toLowerCase() === data.currentOwner.toLowerCase() ? '⚡ Owner Actions' : 'ℹ️ Package Information'}
+              </h3>
+              {account.toLowerCase() !== data.currentOwner.toLowerCase() && (
+                <div style={{ 
+                  backgroundColor: '#fff3cd', 
+                  border: '1px solid #ffc107', 
+                  borderRadius: 4, 
+                  padding: 12, 
+                  marginBottom: 16,
+                  color: '#856404'
+                }}>
+                  <strong>Note:</strong> You are not the current owner of this package. Only the owner can transfer or mark as delivered.
+                  <br />
+                  <strong>Current Owner:</strong> {data.currentOwner}
+                  <br />
+                  <strong>Your Address:</strong> {account}
+                </div>
+              )}
+              {account.toLowerCase() === data.currentOwner.toLowerCase() && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold', color: '#004085' }}>
+                    Transfer Ownership:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="New owner address (0x...)"
+                    value={transferTo}
+                    onChange={(e) => {
+                      setTransferTo(e.target.value);
+                      setValidationErrors({}); // Clear validation error on change
                     }}
-                  >
-                    🚚 Transfer Package
-                  </button>
-                  {data.status !== 2 && (
-                    <>
-                      <button 
-                        onClick={doDeliver}
-                        style={{
-                          backgroundColor: '#17a2b8',
-                          color: 'white',
-                          border: 'none',
-                          padding: '12px 24px',
-                          borderRadius: 4,
-                          cursor: 'pointer',
-                          fontSize: '16px',
-                          fontWeight: 'bold'
-                        }}
-                      >
-                        ✅ Mark as Delivered
-                      </button>
-                      <GasEstimate
-                        contract={contract}
-                        methodName="markAsDelivered"
-                        args={[idNum]}
-                        network={network}
-                      />
-                    </>
+                    style={{ 
+                      width: '100%', 
+                      padding: 12, 
+                      border: validationErrors.transferAddress ? '2px solid #dc3545' : '1px solid #ccc',
+                      borderRadius: 4,
+                      fontSize: '16px',
+                      marginBottom: 8
+                    }}
+                  />
+                  {validationErrors.transferAddress && (
+                    <div style={{ color: '#dc3545', fontSize: '14px', marginBottom: 12 }}>
+                      {validationErrors.transferAddress}
+                    </div>
                   )}
-                  {data.status === 2 && (
+                  <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                     <button 
-                      onClick={doMarkInTransit}
+                      onClick={doTransfer}
+                      disabled={!transferTo || transferTo.trim() === ''}
                       style={{
-                        backgroundColor: '#ffc107',
-                        color: '#212529',
+                        backgroundColor: (!transferTo || transferTo.trim() === '') ? '#6c757d' : '#28a745',
+                        color: 'white',
                         border: 'none',
                         padding: '12px 24px',
                         borderRadius: 4,
-                        cursor: 'pointer',
+                        cursor: (!transferTo || transferTo.trim() === '') ? 'not-allowed' : 'pointer',
                         fontSize: '16px',
-                        fontWeight: 'bold'
+                        fontWeight: 'bold',
+                        opacity: (!transferTo || transferTo.trim() === '') ? 0.6 : 1
                       }}
                     >
-                      🚛 Mark as In Transit
+                      🚚 Transfer Package
                     </button>
-                  )}
+                    {transferTo && transferTo.trim() !== '' && contract && data && (
+                      <GasEstimate
+                        contract={contract}
+                        methodName="transferOwnership"
+                        args={[Number(data.id), transferTo.trim()]}
+                      />
+                    )}
+                    {data.status !== 2 && (
+                      <>
+                        <button 
+                          onClick={doDeliver}
+                          style={{
+                            backgroundColor: '#17a2b8',
+                            color: 'white',
+                            border: 'none',
+                            padding: '12px 24px',
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            fontSize: '16px',
+                            fontWeight: 'bold'
+                          }}
+                        >
+                          ✅ Mark as Delivered
+                        </button>
+                        <GasEstimate
+                          contract={contract}
+                          methodName="markAsDelivered"
+                          args={[Number(data.id)]}
+                          network={network}
+                        />
+                      </>
+                    )}
+                    {data.status === 2 && (
+                      <>
+                        <button 
+                          onClick={doMarkInTransit}
+                          style={{
+                            backgroundColor: '#ffc107',
+                            color: '#212529',
+                            border: 'none',
+                            padding: '12px 24px',
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            fontSize: '16px',
+                            fontWeight: 'bold'
+                          }}
+                        >
+                          🚛 Mark as In Transit
+                        </button>
+                        {contract && data && (
+                          <GasEstimate
+                            contract={contract}
+                            methodName="markAsInTransit"
+                            args={[Number(data.id)]}
+                          />
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
-          <PackageHistory contract={contract} packageId={data.id} provider={provider} />
+          <PackageHistory contract={contract} packageId={data.id} />
           
           <QRCodeGenerator packageId={data.id} packageData={data} />
           
@@ -484,4 +558,8 @@ export default function PackageTracker({ contract, account, provider, network })
   );
 }
 
-
+PackageTracker.propTypes = {
+  contract: PropTypes.object,
+  account: PropTypes.string,
+  network: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
+};

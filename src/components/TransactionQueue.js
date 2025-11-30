@@ -4,7 +4,7 @@
  * Displays transaction queue with status, retry, and cancel functionality.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useTransaction } from '../hooks/useTransaction';
 import { getBlockExplorerUrl } from '../config/networks';
 import logger from '../services/logging';

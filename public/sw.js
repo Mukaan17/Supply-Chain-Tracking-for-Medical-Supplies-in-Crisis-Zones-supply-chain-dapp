@@ -4,8 +4,8 @@
  * Provides offline functionality, caching, and background sync.
  */
 
-const CACHE_NAME = 'supply-chain-v1';
-const RUNTIME_CACHE = 'supply-chain-runtime';
+const CACHE_NAME = 'supply-chain-v3.0.0';
+const RUNTIME_CACHE = 'supply-chain-runtime-v3';
 const OFFLINE_URL = '/offline.html';
 
 // Assets to cache on install
@@ -35,6 +35,7 @@ self.addEventListener('activate', (event) => {
       return Promise.all(
         cacheNames
           .filter((cacheName) => {
+            // Delete all old caches (v1, v2, etc.) to force fresh load
             return cacheName !== CACHE_NAME && cacheName !== RUNTIME_CACHE;
           })
           .map((cacheName) => {
@@ -43,7 +44,18 @@ self.addEventListener('activate', (event) => {
           })
       );
     })
-      .then(() => self.clients.claim())
+      .then(() => {
+        // Force all clients to reload to get new version
+        return self.clients.claim();
+      })
+      .then(() => {
+        // Notify all clients to reload
+        return self.clients.matchAll().then((clients) => {
+          clients.forEach((client) => {
+            client.postMessage({ type: 'SW_UPDATED', version: '3.0.0' });
+          });
+        });
+      })
   );
 });
 
@@ -56,6 +68,20 @@ self.addEventListener('fetch', (event) => {
 
   // Skip chrome-extension and other protocols
   if (!event.request.url.startsWith('http')) {
+    return;
+  }
+
+  // Don't cache chunk files in development (they change frequently with HMR)
+  const isChunkFile = event.request.url.includes('/static/js/') && 
+                      (event.request.url.includes('.chunk.js') || 
+                       event.request.url.includes('node_modules'));
+  
+  // In development, always fetch chunks from network
+  if (isChunkFile) {
+    event.respondWith(fetch(event.request).catch(() => {
+      // If fetch fails, try cache as fallback
+      return caches.match(event.request);
+    }));
     return;
   }
 

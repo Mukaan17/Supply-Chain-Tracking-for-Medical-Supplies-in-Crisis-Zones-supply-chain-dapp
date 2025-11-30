@@ -4,7 +4,8 @@
  * Manages transaction queue, nonce tracking, retry logic, and transaction history.
  */
 
-import { ethers } from 'ethers';
+// ethers available if needed for type checking or future use
+// import { ethers } from 'ethers';
 import config from '../config';
 import logger from './logging';
 import errorTracking from './errorTracking';

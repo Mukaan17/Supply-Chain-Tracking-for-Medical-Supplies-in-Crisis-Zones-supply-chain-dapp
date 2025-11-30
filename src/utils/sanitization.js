@@ -52,7 +52,7 @@ export function sanitizeAddress(address) {
   }
 
   // Remove whitespace and convert to lowercase
-  let sanitized = address.trim().toLowerCase();
+  const sanitized = address.trim().toLowerCase();
 
   // Validate format
   if (!/^0x[a-f0-9]{40}$/.test(sanitized)) {

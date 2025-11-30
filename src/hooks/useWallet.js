@@ -1,229 +1,119 @@
 /**
- * useWallet Hook
+ * useWallet Hook (Wagmi-based)
  * 
- * Custom hook for wallet connection, account management, and network switching.
+ * Custom hook for wallet connection using wagmi.
+ * Provides wallet connection, account management, and network switching.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { ethers } from 'ethers';
-import { getNetworkByChainId, getMetaMaskNetworkConfig } from '../config/networks';
+import React from 'react';
+import { useAccount, useConnect, useDisconnect, useChainId, useSwitchChain } from 'wagmi';
+import { getNetworkByChainId } from '../config/networks';
 import logger from '../services/logging';
-import errorTracking from '../services/errorTracking';
 import analytics from '../services/analytics';
-import { handleError } from '../utils/errorHandler';
 
 export function useWallet() {
-  const [account, setAccount] = useState('');
-  const [provider, setProvider] = useState(null);
-  const [signer, setSigner] = useState(null);
-  const [network, setNetwork] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [isConnected, setIsConnected] = useState(false);
+  const { address, isConnected, connector } = useAccount();
+  const { connect, connectors, isPending: isConnecting } = useConnect();
+  const { disconnect } = useDisconnect();
+  const chainId = useChainId();
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
 
-  // Check if MetaMask is installed
-  const isMetaMaskInstalled = typeof window !== 'undefined' && window.ethereum;
+  // Get network config from chain ID
+  const network = getNetworkByChainId(chainId);
 
   // Connect wallet
-  const connectWallet = useCallback(async () => {
-    if (!isMetaMaskInstalled) {
-      const error = new Error('MetaMask not detected. Please install MetaMask.');
-      setError(handleError(error));
-      return;
-    }
-
+  const connectWallet = async (connectorId) => {
     try {
-      setLoading(true);
-      setError(null);
-
-      // Request account access
-      const accounts = await window.ethereum.request({
-        method: 'eth_requestAccounts',
-      });
-
-      if (accounts.length === 0) {
-        throw new Error('No accounts found');
+      const selectedConnector = connectors.find(c => c.id === connectorId || c.name === connectorId);
+      if (!selectedConnector) {
+        throw new Error(`Connector ${connectorId} not found`);
       }
 
-      const selectedAccount = accounts[0];
-      setAccount(selectedAccount);
-
-      // Create provider and signer
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const browserSigner = await browserProvider.getSigner();
-
-      setProvider(browserProvider);
-      setSigner(browserSigner);
-
-      // Get network
-      const networkInfo = await browserProvider.getNetwork();
-      const networkConfig = getNetworkByChainId(Number(networkInfo.chainId));
-      setNetwork(networkConfig);
-
-      setIsConnected(true);
-
-      // Track analytics
-      analytics.setUserId(selectedAccount);
-      analytics.trackEvent('wallet_connected', {
-        address: selectedAccount,
-        network: networkConfig?.name,
-      });
-
-      logger.info('Wallet connected', {
-        address: selectedAccount,
-        network: networkConfig?.name,
+      connect({ connector: selectedConnector });
+      
+      logger.info('Wallet connection initiated', {
+        connector: selectedConnector.name,
       });
     } catch (err) {
-      const errorInfo = handleError(err, { component: 'useWallet' });
-      setError(errorInfo);
-      errorTracking.captureException(err, {
-        tags: { component: 'useWallet' },
-      });
-      
-      // Track user rejection separately
-      if (err.code === 4001) {
-        analytics.trackEvent('wallet_connection_rejected');
-      }
-    } finally {
-      setLoading(false);
+      logger.error('Failed to connect wallet', err);
+      throw err;
     }
-  }, [isMetaMaskInstalled]);
+  };
 
   // Disconnect wallet
-  const disconnectWallet = useCallback(() => {
-    setAccount('');
-    setProvider(null);
-    setSigner(null);
-    setNetwork(null);
-    setIsConnected(false);
-    setError(null);
-
+  const disconnectWallet = () => {
+    disconnect();
     analytics.clearUser();
     logger.info('Wallet disconnected');
-  }, []);
+  };
 
   // Switch network
-  const switchNetwork = useCallback(async (networkName) => {
-    if (!isMetaMaskInstalled) {
-      throw new Error('MetaMask not detected');
-    }
-
+  const switchNetwork = async (targetChainId) => {
     try {
-      setLoading(true);
-      setError(null);
-
-      const networkConfig = getMetaMaskNetworkConfig(networkName);
-      if (!networkConfig) {
-        throw new Error(`Network ${networkName} not supported`);
-      }
-
-      try {
-        // Try to switch
-        await window.ethereum.request({
-          method: 'wallet_switchEthereumChain',
-          params: [{ chainId: networkConfig.chainId }],
-        });
-      } catch (switchError) {
-        // If network doesn't exist, add it
-        if (switchError.code === 4902) {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [networkConfig],
-          });
-        } else {
-          throw switchError;
-        }
-      }
-
-      // Update network after switch
-      const browserProvider = new ethers.BrowserProvider(window.ethereum);
-      const networkInfo = await browserProvider.getNetwork();
-      const networkConfigUpdated = getNetworkByChainId(Number(networkInfo.chainId));
-      setNetwork(networkConfigUpdated);
-
-      logger.info('Network switched', { network: networkName });
-      analytics.trackEvent('network_switched', { network: networkName });
+      await switchChain({ chainId: targetChainId });
+      logger.info('Network switched', { chainId: targetChainId });
+      analytics.trackEvent('network_switched', { chainId: targetChainId });
     } catch (err) {
-      const errorInfo = handleError(err, {
-        component: 'useWallet',
-        network: networkName,
-      });
-      setError(errorInfo);
-      throw errorInfo;
-    } finally {
-      setLoading(false);
+      logger.error('Failed to switch network', err);
+      throw err;
     }
-  }, [isMetaMaskInstalled]);
+  };
 
-  // Check connection on mount
-  useEffect(() => {
-    if (!isMetaMaskInstalled) {
-      return;
-    }
-
-    const checkConnection = async () => {
-      try {
-        const accounts = await window.ethereum.request({
-          method: 'eth_accounts',
+  // Switch account
+  const switchAccount = async () => {
+    try {
+      if (typeof window !== 'undefined' && window.ethereum) {
+        // Request account switch - this will prompt the user to select a different account
+        await window.ethereum.request({
+          method: 'wallet_requestPermissions',
+          params: [{ eth_accounts: {} }],
         });
-
-        if (accounts.length > 0) {
-          // Auto-connect if already connected
-          await connectWallet();
-        }
-      } catch (err) {
-        logger.error('Failed to check wallet connection', err);
-      }
-    };
-
-    checkConnection();
-
-    // Listen for account changes
-    const handleAccountsChanged = (accounts) => {
-      if (accounts.length === 0) {
-        disconnectWallet();
+        // Then request accounts again to get the new account
+        await window.ethereum.request({
+          method: 'eth_requestAccounts',
+        });
+        logger.info('Account switch requested');
+        analytics.trackEvent('account_switch_requested');
       } else {
-        setAccount(accounts[0]);
-        analytics.setUserId(accounts[0]);
+        throw new Error('No wallet provider found');
       }
-    };
+    } catch (err) {
+      logger.error('Failed to switch account', err);
+      throw err;
+    }
+  };
 
-    // Listen for network changes
-    const handleChainChanged = async (chainId) => {
-      const networkConfig = getNetworkByChainId(Number(chainId));
-      setNetwork(networkConfig);
-      
-      // Reconnect to update provider
-      if (isConnected) {
-        await connectWallet();
-      }
-    };
-
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    window.ethereum.on('chainChanged', handleChainChanged);
-
-    return () => {
-      if (window.ethereum) {
-        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-        window.ethereum.removeListener('chainChanged', handleChainChanged);
-      }
-    };
-  }, [isMetaMaskInstalled, connectWallet, disconnectWallet, isConnected]);
+  // Track wallet connection
+  React.useEffect(() => {
+    if (isConnected && address) {
+      analytics.setUserId(address);
+      analytics.trackEvent('wallet_connected', {
+        address,
+        network: network?.name,
+        connector: connector?.name,
+      });
+      logger.info('Wallet connected', {
+        address,
+        network: network?.name,
+      });
+    }
+  }, [isConnected, address, network, connector]);
 
   return {
-    account,
-    provider,
-    signer,
-    network,
-    loading,
-    error,
+    account: address || '',
     isConnected,
-    isMetaMaskInstalled,
+    network,
+    chainId,
+    connector,
+    connectors,
+    loading: isConnecting || isSwitching,
+    error: null, // wagmi handles errors internally
     connectWallet,
     disconnectWallet,
     switchNetwork,
+    switchAccount,
+    isMetaMaskInstalled: typeof window !== 'undefined' && window.ethereum,
   };
 }
 
 export default useWallet;
-

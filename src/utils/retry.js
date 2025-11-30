@@ -78,7 +78,7 @@ export async function retry(fn, options = {}) {
 export function retryOnError(fn, errorConditions = [], options = {}) {
   return retry(fn, {
     ...options,
-    shouldRetry: (error, attempt) => {
+    shouldRetry: (error, _attempt) => {
       // Check if error matches any condition
       return errorConditions.some(condition => {
         if (typeof condition === 'string') {

@@ -39,7 +39,7 @@ function getLogLevel() {
 
 const currentLogLevel = getLogLevel();
 const isDevelopment = config.app.environment === 'development';
-const isProduction = config.app.environment === 'production';
+// const isProduction = config.app.environment === 'production'; // Unused
 
 /**
  * Log entry structure
@@ -158,8 +158,10 @@ class Logger {
                            level === LogLevel.INFO ? 'info' : 'log';
       
       if (error) {
+        // eslint-disable-next-line no-console
         console[consoleMethod](entry.toString(), error);
       } else {
+        // eslint-disable-next-line no-console
         console[consoleMethod](entry.toString());
       }
     }
@@ -170,6 +172,7 @@ class Logger {
         service.log(entry);
       } catch (err) {
         // Don't let external service errors break logging
+        // eslint-disable-next-line no-console
         console.error('External logging service error:', err);
       }
     });

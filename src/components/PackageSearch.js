@@ -4,17 +4,19 @@
  * @Last Modified by:   Mukhil Sundararaj
  * @Last Modified time: 2025-09-11 19:08:13
  */
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import PropTypes from 'prop-types';
 import { debounce } from '../utils/debounce';
 import cacheService from '../utils/cache';
 import logger from '../services/logging';
 import errorTracking from '../services/errorTracking';
 import { handleError } from '../utils/errorHandler';
-import { VirtualList } from '../utils/virtualScroll';
-import { NoSearchResultsEmptyState } from './EmptyStates';
-import { ListItemSkeleton } from './LoadingStates';
+// VirtualList, NoSearchResultsEmptyState, and ListItemSkeleton available if needed
+// import { VirtualList } from '../utils/virtualScroll';
+// import { NoSearchResultsEmptyState } from './EmptyStates';
+// import { ListItemSkeleton } from './LoadingStates';
 
-export default function PackageSearch({ contract, onPackageSelect }) {
+export default function PackageSearch({ contract, onPackageSelect, account }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchResults, setSearchResults] = useState([]);
@@ -31,7 +33,7 @@ export default function PackageSearch({ contract, onPackageSelect }) {
     { value: '2', label: 'Delivered' }
   ];
 
-  const searchPackages = async () => {
+  const searchPackages = useCallback(async (isCancelledRef = { current: false }) => {
     if (!contract || !searchTerm.trim()) {
       setSearchResults([]);
       return;
@@ -41,6 +43,7 @@ export default function PackageSearch({ contract, onPackageSelect }) {
     const cacheKey = `search_${searchTerm}_${statusFilter}_${currentPage}`;
     const cached = await cacheService.get(cacheKey, 'search');
     if (cached) {
+      if (isCancelledRef.current) return;
       setSearchResults(cached);
       logger.debug('Search results loaded from cache', { searchTerm, statusFilter });
       return;
@@ -52,45 +55,81 @@ export default function PackageSearch({ contract, onPackageSelect }) {
     try {
       logger.debug('Searching packages', { searchTerm, statusFilter, page: currentPage });
       
-      // Get total packages count (if available)
+      // Get total packages count
+      let total = 0;
       try {
-        const total = await contract.getTotalPackages();
-        setTotalPackages(Number(total));
+        const totalResult = await contract.getTotalPackages();
+        total = Number(totalResult);
+        setTotalPackages(total);
       } catch (e) {
-        // Fallback if method not available
-        logger.debug('getTotalPackages not available, using estimate');
+        logger.warn('getTotalPackages not available', e);
+        // If we can't get total, try a reasonable default but warn user
+        total = 0;
       }
       
-      const results = [];
-      const startId = (currentPage - 1) * itemsPerPage + 1;
-      const endId = Math.min(startId + itemsPerPage - 1, totalPackages || 100);
+      // If no packages exist, return early
+      if (total === 0) {
+        setSearchResults([]);
+        setError('No packages found on the network. Create a package first.');
+        setIsSearching(false);
+        return;
+      }
       
-      // Search in batches
+      // Instead of searching sequentially (which misses gaps), search all packages
+      // But limit to reasonable batch size to avoid RPC timeouts
+      const maxSearchRange = 500; // Search up to 500 packages at a time
+      const actualTotal = Math.min(total, maxSearchRange);
+      const startId = (currentPage - 1) * itemsPerPage + 1;
+      const endId = Math.min(startId + itemsPerPage - 1, actualTotal);
+      
+      // Validate range
+      if (startId > actualTotal || startId < 1) {
+        setSearchResults([]);
+        setError('Invalid search range');
+        setIsSearching(false);
+        return;
+      }
+      
+      logger.debug('Searching package range', { startId, endId, total });
+      
+      // Search in batches with better error handling
       const searchPromises = [];
       for (let id = startId; id <= endId; id++) {
         searchPromises.push(
           contract.getPackageDetails(id)
-            .then(packageData => ({
-              id: packageData[0].toString(),
-              description: packageData[1],
-              creator: packageData[2],
-              currentOwner: packageData[3],
-              status: Number(packageData[4]),
-            }))
-            .catch(() => null) // Package doesn't exist
+            .then(packageData => {
+              if (!packageData || packageData.length === 0) {
+                return null;
+              }
+              return {
+                id: packageData[0].toString(),
+                description: packageData[1],
+                creator: packageData[2],
+                currentOwner: packageData[3],
+                status: Number(packageData[4]),
+              };
+            })
+            .catch((err) => {
+              // Package doesn't exist or error - return null
+              logger.debug('Package not found or error', { id, error: err.message });
+              return null;
+            })
         );
       }
       
       const packages = await Promise.all(searchPromises);
       
-      // Filter results
+      // Filter results - remove nulls and apply search/status filters
       const filtered = packages
-        .filter(pkg => pkg !== null)
+        .filter(pkg => pkg !== null && pkg.id) // Remove nulls and invalid packages
         .filter(pkg => {
-          const matchesSearch = pkg.description.toLowerCase().includes(searchTerm.toLowerCase());
+          const matchesSearch = pkg.description && pkg.description.toLowerCase().includes(searchTerm.toLowerCase());
           const matchesStatus = statusFilter === 'all' || pkg.status.toString() === statusFilter;
           return matchesSearch && matchesStatus;
         });
+      
+      // Check if cancelled before setting state
+      if (isCancelledRef.current) return;
       
       setSearchResults(filtered);
       
@@ -103,9 +142,12 @@ export default function PackageSearch({ contract, onPackageSelect }) {
       logger.info('Search completed', {
         searchTerm,
         resultsCount: filtered.length,
+        totalSearched: packages.filter(p => p !== null).length,
         page: currentPage,
       });
     } catch (err) {
+      // Check if cancelled before setting state
+      if (isCancelledRef.current) return;
       const errorInfo = handleError(err, {
         component: 'PackageSearch',
         action: 'searchPackages',
@@ -115,26 +157,36 @@ export default function PackageSearch({ contract, onPackageSelect }) {
         tags: { component: 'PackageSearch' },
       });
       setError(errorInfo.message || 'Failed to search packages');
+      setSearchResults([]);
     } finally {
       setIsSearching(false);
     }
-  };
+  }, [contract, searchTerm, statusFilter, currentPage]);
 
-  // Debounced search
+  // Use ref to track if component is mounted
+  const isMountedRef = useRef(true);
+
+  // Debounced search with cancellation support
   const debouncedSearch = useMemo(
     () => debounce(() => {
+      if (!isMountedRef.current) return;
       setCurrentPage(1); // Reset to first page on new search
-      searchPackages();
+      searchPackages(isMountedRef);
     }, 500),
-    [searchTerm, statusFilter, contract]
+    [searchPackages]
   );
 
   useEffect(() => {
+    isMountedRef.current = true;
     if (searchTerm.trim()) {
       debouncedSearch();
     } else {
       setSearchResults([]);
     }
+    
+    return () => {
+      isMountedRef.current = false;
+    };
   }, [searchTerm, statusFilter, debouncedSearch]);
 
   const handlePackageSelect = (packageData) => {
@@ -263,8 +315,36 @@ export default function PackageSearch({ contract, onPackageSelect }) {
       {searchTerm && !isSearching && searchResults.length === 0 && (
         <div style={{ textAlign: 'center', padding: 20, color: '#6c757d' }}>
           No packages found matching your search criteria.
+          {totalPackages > 0 && (
+            <div style={{ marginTop: 8, fontSize: '14px' }}>
+              Searched {Math.min(totalPackages, 500)} packages. Try a different search term or check if the package exists.
+            </div>
+          )}
+        </div>
+      )}
+
+      {!searchTerm && account && contract && (
+        <div style={{ 
+          backgroundColor: '#e7f3ff', 
+          border: '1px solid #b3d9ff', 
+          borderRadius: 4, 
+          padding: 12, 
+          marginTop: 16,
+          fontSize: '14px',
+          color: '#004085'
+        }}>
+          <strong>💡 Tip:</strong> Enter a search term to find packages by description. 
+          {totalPackages > 0 && (
+            <span> There are {totalPackages} total packages on the network.</span>
+          )}
         </div>
       )}
     </div>
   );
 }
+
+PackageSearch.propTypes = {
+  contract: PropTypes.object,
+  onPackageSelect: PropTypes.func,
+  account: PropTypes.string,
+};

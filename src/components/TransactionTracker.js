@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import PropTypes from 'prop-types';
 
 export default function TransactionTracker({ transaction, onComplete, onError }) {
   const [status, setStatus] = useState('pending');
@@ -10,6 +11,8 @@ export default function TransactionTracker({ transaction, onComplete, onError })
   useEffect(() => {
     if (!transaction) return;
 
+    let isCancelled = false;
+
     const trackTransaction = async () => {
       try {
         setStatus('pending');
@@ -18,10 +21,16 @@ export default function TransactionTracker({ transaction, onComplete, onError })
         // Wait for transaction to be mined
         const receipt = await transaction.wait();
         
+        // Check if component was unmounted
+        if (isCancelled) return;
+        
         if (receipt.status === 1) {
           setStatus('success');
-          setGasUsed(receipt.gasUsed.toString());
-          setBlockNumber(receipt.blockNumber.toString());
+          // Handle BigInt values from ethers v6
+          const gasUsedValue = receipt.gasUsed;
+          const blockNumberValue = receipt.blockNumber;
+          setGasUsed(gasUsedValue ? (typeof gasUsedValue === 'bigint' ? gasUsedValue.toString() : String(gasUsedValue)) : null);
+          setBlockNumber(blockNumberValue ? (typeof blockNumberValue === 'bigint' ? blockNumberValue.toString() : String(blockNumberValue)) : null);
           
           if (onComplete) {
             onComplete(receipt);
@@ -34,6 +43,9 @@ export default function TransactionTracker({ transaction, onComplete, onError })
           }
         }
       } catch (err) {
+        // Check if component was unmounted
+        if (isCancelled) return;
+        
         setStatus('failed');
         setError(err.message);
         if (onError) {
@@ -43,6 +55,11 @@ export default function TransactionTracker({ transaction, onComplete, onError })
     };
 
     trackTransaction();
+
+    // Cleanup function
+    return () => {
+      isCancelled = true;
+    };
   }, [transaction, onComplete, onError]);
 
   const getStatusIcon = () => {
@@ -137,3 +154,9 @@ export default function TransactionTracker({ transaction, onComplete, onError })
     </div>
   );
 }
+
+TransactionTracker.propTypes = {
+  transaction: PropTypes.object,
+  onComplete: PropTypes.func,
+  onError: PropTypes.func,
+};

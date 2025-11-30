@@ -1,154 +1,121 @@
 /**
- * useContract Hook
+ * useContract Hook (Wagmi-based)
  * 
- * Custom hook for contract interactions with automatic reconnection,
- * error handling, and transaction queue integration.
+ * Custom hook for contract interactions using wagmi.
+ * Provides contract read/write operations with automatic caching.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { ethers } from 'ethers';
-import { getContractConfig } from '../config/contracts';
-import { getNetworkByChainId } from '../config/networks';
-import transactionManager from '../services/transactionManager';
+import { useReadContract, useWriteContract, useWatchContractEvent } from 'wagmi';
+import { useChainId } from 'wagmi';
+import { getContractAddressForChain } from '../config/wagmi';
+import { getContractABI } from '../config/contracts';
 import logger from '../services/logging';
-import errorTracking from '../services/errorTracking';
-import { handleError } from '../utils/errorHandler';
-import { retry } from '../utils/retry';
 
-export function useContract(provider, signer, networkName) {
-  const [contract, setContract] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const contractRef = useRef(null);
+/**
+ * Hook to get contract address for current chain
+ */
+export function useContractAddress() {
+  const chainId = useChainId();
+  return getContractAddressForChain(chainId);
+}
 
-  // Initialize contract
-  useEffect(() => {
-    if (!provider || !signer || !networkName) {
-      setContract(null);
-      setLoading(false);
-      return;
-    }
+/**
+ * Hook to read contract data
+ */
+export function useReadContractData(functionName, args = [], options = {}) {
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
 
-    const initContract = async () => {
-      try {
-        setLoading(true);
-        setError(null);
+  return useReadContract({
+    address: contractAddress,
+    abi,
+    functionName,
+    args,
+    query: {
+      enabled: !!contractAddress && options.enabled !== false,
+      ...options,
+    },
+  });
+}
 
-        const config = getContractConfig(networkName);
-        const contractInstance = new ethers.Contract(
-          config.address,
-          config.abi,
-          signer
-        );
+/**
+ * Hook to write to contract
+ */
+export function useWriteContractData() {
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
+  const { writeContract, isPending, isSuccess, isError, error, data } = useWriteContract();
 
-        contractRef.current = contractInstance;
-        setContract(contractInstance);
-
-        // Initialize transaction manager
-        transactionManager.init(provider, signer);
-
-        logger.info('Contract initialized', {
-          address: config.address,
-          network: networkName,
-        });
-      } catch (err) {
-        const errorInfo = handleError(err, {
-          component: 'useContract',
-          network: networkName,
-        });
-        setError(errorInfo);
-        errorTracking.captureException(err, {
-          tags: { component: 'useContract' },
-          extra: { network: networkName },
-        });
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    initContract();
-  }, [provider, signer, networkName]);
-
-  // Update transaction manager on provider/signer change
-  useEffect(() => {
-    if (provider && signer) {
-      transactionManager.updateProvider(provider, signer).catch((error) => {
-        logger.error('Failed to update transaction manager provider', error);
-      });
-    }
-  }, [provider, signer]);
-
-  // Contract interaction wrapper with error handling
-  const callContract = useCallback(async (methodName, ...args) => {
-    if (!contract) {
-      throw new Error('Contract not initialized');
+  const write = async (functionName, args = [], options = {}) => {
+    if (!contractAddress) {
+      throw new Error('Contract address not configured for current network');
     }
 
     try {
-      const method = contract[methodName];
-      if (!method) {
-        throw new Error(`Method ${methodName} not found`);
-      }
-
-      logger.debug('Calling contract method', { methodName, args });
-      const result = await retry(() => method(...args), {
-        maxAttempts: 3,
-        delay: 1000,
+      logger.info('Writing to contract', { functionName, args });
+      await writeContract({
+        address: contractAddress,
+        abi,
+        functionName,
+        args,
+        ...options,
       });
-
-      return result;
     } catch (err) {
-      const errorInfo = handleError(err, {
-        component: 'useContract',
-        method: methodName,
-      });
-      throw errorInfo;
+      logger.error('Contract write failed', err);
+      throw err;
     }
-  }, [contract]);
-
-  // Send transaction with queue management
-  const sendTransaction = useCallback(async (methodName, ...args) => {
-    if (!contract) {
-      throw new Error('Contract not initialized');
-    }
-
-    try {
-      const method = contract[methodName];
-      if (!method) {
-        throw new Error(`Method ${methodName} not found`);
-      }
-
-      logger.info('Sending transaction', { methodName });
-
-      // Create transaction promise
-      const txPromise = method(...args);
-
-      // Add to transaction queue
-      const entry = await transactionManager.addTransaction(txPromise, {
-        method: methodName,
-        params: args,
-        description: `Call ${methodName}`,
-      });
-
-      return entry;
-    } catch (err) {
-      const errorInfo = handleError(err, {
-        component: 'useContract',
-        method: methodName,
-      });
-      throw errorInfo;
-    }
-  }, [contract]);
+  };
 
   return {
-    contract,
-    loading,
+    write,
+    writeContract,
+    isPending,
+    isSuccess,
+    isError,
     error,
-    callContract,
+    data,
+  };
+}
+
+/**
+ * Hook to watch contract events
+ */
+export function useWatchContractEvents(eventName, args = {}, onLogs) {
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
+
+  return useWatchContractEvent({
+    address: contractAddress,
+    abi,
+    eventName,
+    args,
+    onLogs,
+    enabled: !!contractAddress,
+  });
+}
+
+/**
+ * Main useContract hook - provides contract instance and helper methods
+ */
+export function useContract() {
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
+  const writeContract = useWriteContractData();
+
+  // Helper to write to contract
+  const sendTransaction = async (functionName, args = [], options = {}) => {
+    return writeContract.write(functionName, args, options);
+  };
+
+  return {
+    address: contractAddress,
+    abi,
+    writeContract,
     sendTransaction,
-    isReady: contract !== null && !loading && !error,
+    isReady: !!contractAddress,
+    loading: false,
+    error: null,
   };
 }
 
 export default useContract;
-

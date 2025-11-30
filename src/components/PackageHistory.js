@@ -1,9 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import PropTypes from 'prop-types';
+import { usePublicClient, useBlockNumber } from 'wagmi';
 import logger from '../services/logging';
 import errorTracking from '../services/errorTracking';
 import { handleError } from '../utils/errorHandler';
 import websocketService from '../services/websocket';
 import cacheService from '../utils/cache';
+import { useContractAddress } from '../hooks/useContract';
+import { getContractABI } from '../config/contracts';
 
 // Add CSS animation for live indicator
 const pulseStyle = `
@@ -21,16 +25,20 @@ if (typeof document !== 'undefined') {
   document.head.appendChild(style);
 }
 
-export default function PackageHistory({ contract, packageId, provider }) {
+export default function PackageHistory({ contract, packageId }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isLive, setIsLive] = useState(false);
-  const [processedEvents, setProcessedEvents] = useState(new Set());
+  const [, setProcessedEvents] = useState(new Set());
   const eventListenersRef = useRef([]);
   const pollingIntervalRef = useRef(null);
+  const publicClient = usePublicClient();
+  const { data: blockNumber } = useBlockNumber({ watch: true });
+  const contractAddress = useContractAddress();
+  const abi = getContractABI();
 
-  const fetchEvents = async () => {
-    if (!contract || !packageId || !provider) return;
+  const fetchEvents = useCallback(async () => {
+    if (!contract || !packageId || !publicClient || !contractAddress) return;
     
     // Check cache first
     const cacheKey = `package_events_${packageId}`;
@@ -43,47 +51,94 @@ export default function PackageHistory({ contract, packageId, provider }) {
     
     setLoading(true);
     try {
-      logger.debug('Fetching events for package', { packageId, provider: provider.constructor.name });
+      logger.debug('Fetching events for package', { packageId });
       
-      // Get all events for this package with a more limited range to avoid RPC errors
-      const currentBlock = await provider.getBlockNumber();
-      const fromBlock = Math.max(0, currentBlock - 10000); // Only look at last 10k blocks
+      // Get all events for this package - search from deployment block or last 50k blocks
+      const currentBlock = blockNumber ? Number(blockNumber) : await publicClient.getBlockNumber();
+      // Search more blocks to ensure we get all history, but limit to avoid RPC timeouts
+      const fromBlock = Math.max(0, currentBlock - 50000); // Look at last 50k blocks
       
-      const createdFilter = contract.filters.PackageCreated(packageId);
-      const transferredFilter = contract.filters.PackageTransferred(packageId);
-      const deliveredFilter = contract.filters.PackageDelivered(packageId);
+      // Filter by package ID (first indexed parameter in all events)
+      // PackageCreated(uint256 indexed id, string description, address indexed creator, uint256 timestamp)
+      // PackageTransferred(uint256 indexed id, address indexed from, address indexed to, Status status, uint256 timestamp)
+      // PackageDelivered(uint256 indexed id, address indexed owner, uint256 timestamp)
+      // PackageStatusUpdated(uint256 indexed id, Status oldStatus, Status newStatus, address indexed updater, uint256 timestamp)
+      const packageIdBigInt = BigInt(packageId);
 
       logger.debug('Fetching events from blocks', { fromBlock, toBlock: currentBlock });
 
-      const [createdEvents, transferredEvents, deliveredEvents] = await Promise.all([
-        contract.queryFilter(createdFilter, fromBlock, currentBlock).catch(e => {
+      // Use viem's getLogs to fetch events with ABI
+      const packageCreatedEvent = abi.find(e => e.type === 'event' && e.name === 'PackageCreated');
+      const packageTransferredEvent = abi.find(e => e.type === 'event' && e.name === 'PackageTransferred');
+      const packageDeliveredEvent = abi.find(e => e.type === 'event' && e.name === 'PackageDelivered');
+      const packageStatusUpdatedEvent = abi.find(e => e.type === 'event' && e.name === 'PackageStatusUpdated');
+
+      const [createdLogs, transferredLogs, deliveredLogs, statusUpdatedLogs] = await Promise.all([
+        packageCreatedEvent ? publicClient.getLogs({
+          address: contractAddress,
+          event: packageCreatedEvent,
+          args: { id: packageIdBigInt },
+          fromBlock: BigInt(fromBlock),
+          toBlock: BigInt(currentBlock),
+        }).catch(e => {
           logger.error('Error fetching created events', e, { packageId });
           errorTracking.captureException(e, { tags: { component: 'PackageHistory', event: 'created' } });
           return [];
-        }),
-        contract.queryFilter(transferredFilter, fromBlock, currentBlock).catch(e => {
+        }) : Promise.resolve([]),
+        packageTransferredEvent ? publicClient.getLogs({
+          address: contractAddress,
+          event: packageTransferredEvent,
+          args: { id: packageIdBigInt },
+          fromBlock: BigInt(fromBlock),
+          toBlock: BigInt(currentBlock),
+        }).catch(e => {
           logger.error('Error fetching transferred events', e, { packageId });
           errorTracking.captureException(e, { tags: { component: 'PackageHistory', event: 'transferred' } });
           return [];
-        }),
-        contract.queryFilter(deliveredFilter, fromBlock, currentBlock).catch(e => {
+        }) : Promise.resolve([]),
+        packageDeliveredEvent ? publicClient.getLogs({
+          address: contractAddress,
+          event: packageDeliveredEvent,
+          args: { id: packageIdBigInt },
+          fromBlock: BigInt(fromBlock),
+          toBlock: BigInt(currentBlock),
+        }).catch(e => {
           logger.error('Error fetching delivered events', e, { packageId });
           errorTracking.captureException(e, { tags: { component: 'PackageHistory', event: 'delivered' } });
           return [];
-        })
+        }) : Promise.resolve([]),
+        packageStatusUpdatedEvent ? publicClient.getLogs({
+          address: contractAddress,
+          event: packageStatusUpdatedEvent,
+          args: { id: packageIdBigInt },
+          fromBlock: BigInt(fromBlock),
+          toBlock: BigInt(currentBlock),
+        }).catch(e => {
+          logger.error('Error fetching status updated events', e, { packageId });
+          errorTracking.captureException(e, { tags: { component: 'PackageHistory', event: 'statusUpdated' } });
+          return [];
+        }) : Promise.resolve([])
       ]);
+
+      // Convert logs to event-like objects for compatibility
+      const createdEvents = createdLogs.map(log => ({ ...log, type: 'created' }));
+      const transferredEvents = transferredLogs.map(log => ({ ...log, type: 'transferred' }));
+      const deliveredEvents = deliveredLogs.map(log => ({ ...log, type: 'delivered' }));
+      const statusUpdatedEvents = statusUpdatedLogs.map(log => ({ ...log, type: 'statusUpdated' }));
 
       logger.debug('Events fetched', {
         created: createdEvents.length,
         transferred: transferredEvents.length,
         delivered: deliveredEvents.length,
+        statusUpdated: statusUpdatedEvents.length,
       });
 
       // Fetch block timestamps for all events
       const allEvents = [
         ...createdEvents.map(e => ({ ...e, type: 'created' })),
         ...transferredEvents.map(e => ({ ...e, type: 'transferred' })),
-        ...deliveredEvents.map(e => ({ ...e, type: 'delivered' }))
+        ...deliveredEvents.map(e => ({ ...e, type: 'delivered' })),
+        ...statusUpdatedEvents.map(e => ({ ...e, type: 'statusUpdated' }))
       ];
 
       // Get timestamps for all unique blocks
@@ -92,8 +147,12 @@ export default function PackageHistory({ contract, packageId, provider }) {
       
       for (const blockNum of uniqueBlocks) {
         try {
-          const block = await provider.getBlock(blockNum);
-          blockTimestamps[blockNum] = block ? block.timestamp * 1000 : Date.now();
+          const block = await publicClient.getBlock({ blockNumber: BigInt(blockNum) });
+          // Handle BigInt timestamp from ethers v6
+          const blockTimestamp = block?.timestamp;
+          blockTimestamps[blockNum] = blockTimestamp 
+            ? (typeof blockTimestamp === 'bigint' ? Number(blockTimestamp) * 1000 : Number(blockTimestamp) * 1000)
+            : Date.now();
         } catch (e) {
           logger.warn('Error fetching block timestamp', e, { blockNum });
           blockTimestamps[blockNum] = Date.now();
@@ -106,6 +165,7 @@ export default function PackageHistory({ contract, packageId, provider }) {
         timestampMs: blockTimestamps[event.blockNumber] || Date.now()
       })).sort((a, b) => b.blockNumber - a.blockNumber);
 
+      // Only update state if component is still mounted (check via isCancelled in cleanup)
       setEvents(eventsWithTimestamps);
       
       // Cache events
@@ -120,23 +180,35 @@ export default function PackageHistory({ contract, packageId, provider }) {
         component: 'PackageHistory',
         action: 'fetchEvents',
       });
-      logger.error('Failed to fetch events', error, { packageId });
+      logger.error('Failed to fetch events', error, { packageId, errorInfo });
       errorTracking.captureException(error, {
         tags: { component: 'PackageHistory' },
       });
     } finally {
       setLoading(false);
     }
-  };
+  }, [contract, packageId, publicClient, contractAddress, abi, blockNumber]);
 
   useEffect(() => {
-    fetchEvents();
-    setProcessedEvents(new Set()); // Clear processed events when package changes
-  }, [contract, packageId, provider]); // eslint-disable-line react-hooks/exhaustive-deps
+    let isMounted = true;
+    
+    const loadEvents = async () => {
+      await fetchEvents();
+      if (isMounted) {
+        setProcessedEvents(new Set()); // Clear processed events when package changes
+      }
+    };
+    
+    loadEvents();
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [fetchEvents]);
 
   // Subscribe to live events for this package and update in real time
   useEffect(() => {
-    if (!contract || !packageId || !provider) return;
+    if (!contract || !packageId || !publicClient) return;
 
     let isCancelled = false;
     let lastBlockNumber = 0;
@@ -147,14 +219,14 @@ export default function PackageHistory({ contract, packageId, provider }) {
       if (isCancelled) return;
       
       try {
-        const currentBlock = await provider.getBlockNumber();
+        const currentBlock = blockNumber ? Number(blockNumber) : await publicClient.getBlockNumber();
         
         if (currentBlock > lastBlockNumber) {
           logger.debug('New block detected', { currentBlock, lastBlock: lastBlockNumber });
           lastBlockNumber = currentBlock;
           
           // Check for new events in the latest block
-          const latestBlock = await provider.getBlock(currentBlock, true);
+          const latestBlock = await publicClient.getBlock({ blockNumber: BigInt(currentBlock), includeTransactions: true });
           if (latestBlock && latestBlock.transactions) {
             logger.debug('Checking block for events', {
               block: currentBlock,
@@ -178,6 +250,9 @@ export default function PackageHistory({ contract, packageId, provider }) {
     pollForNewEvents();
 
     const addEventWithTimestamp = async (evt, type) => {
+      // Check if cancelled before processing
+      if (isCancelled) return;
+      
       try {
         logger.debug('New event received', { type, packageId, txHash: evt.transactionHash });
         
@@ -185,22 +260,38 @@ export default function PackageHistory({ contract, packageId, provider }) {
         const idx = (evt.index ?? evt.logIndex ?? 0);
         const eventKey = `${evt.transactionHash}:${idx}:${type}`;
         
-        if (!isCancelled) {
-          setProcessedEvents(prevProcessed => {
-            if (prevProcessed.has(eventKey)) {
-              logger.debug('Event already processed', { eventKey });
-              return prevProcessed;
-            }
-            return new Set([...prevProcessed, eventKey]);
-          });
-          
-          // Get the actual block timestamp
-          try {
-            if (provider) {
-              const block = await provider.getBlock(evt.blockNumber);
-              const timestampMs = block ? block.timestamp * 1000 : Date.now();
-              
-              // Add the event to the list with correct timestamp
+        // Check if already processed (synchronously to avoid race conditions)
+        let shouldProcess = false;
+        setProcessedEvents(prevProcessed => {
+          if (prevProcessed.has(eventKey)) {
+            logger.debug('Event already processed', { eventKey });
+            shouldProcess = false;
+            return prevProcessed;
+          }
+          shouldProcess = true;
+          return new Set([...prevProcessed, eventKey]);
+        });
+        
+        // If already processed, skip
+        if (!shouldProcess || isCancelled) return;
+        
+        // Get the actual block timestamp
+        try {
+          if (publicClient) {
+            const blockNum = typeof evt.blockNumber === 'bigint' ? evt.blockNumber : BigInt(evt.blockNumber);
+            const block = await publicClient.getBlock({ blockNumber: blockNum });
+            
+            // Check cancellation again after async operation
+            if (isCancelled) return;
+            
+            // Handle BigInt timestamp from ethers v6
+            const blockTimestamp = block?.timestamp;
+            const timestampMs = blockTimestamp 
+              ? (typeof blockTimestamp === 'bigint' ? Number(blockTimestamp) * 1000 : Number(blockTimestamp) * 1000)
+              : Date.now();
+            
+            // Add the event to the list with correct timestamp
+            if (!isCancelled) {
               setEvents(prev => {
                 const enriched = { ...evt, type, timestampMs };
                 const next = [enriched, ...prev];
@@ -209,17 +300,22 @@ export default function PackageHistory({ contract, packageId, provider }) {
               
               // Invalidate cache
               cacheService.delete(`package_events_${packageId}`, 'packageHistory');
-            } else {
-              // Fallback to current time if no provider
+            }
+          } else {
+            // Fallback to current time if no publicClient
+            if (!isCancelled) {
               setEvents(prev => {
                 const enriched = { ...evt, type, timestampMs: Date.now() };
                 const next = [enriched, ...prev];
                 return next.sort((a, b) => (b.blockNumber - a.blockNumber) || ((b.index ?? b.logIndex ?? 0) - (a.index ?? a.logIndex ?? 0)));
               });
             }
-          } catch (blockError) {
-            logger.warn('Error getting block timestamp', blockError, { blockNumber: evt.blockNumber });
-            // Fallback to current time
+          }
+        } catch (blockError) {
+          if (isCancelled) return;
+          logger.warn('Error getting block timestamp', blockError, { blockNumber: evt.blockNumber });
+          // Fallback to current time
+          if (!isCancelled) {
             setEvents(prev => {
               const enriched = { ...evt, type, timestampMs: Date.now() };
               const next = [enriched, ...prev];
@@ -228,6 +324,7 @@ export default function PackageHistory({ contract, packageId, provider }) {
           }
         }
       } catch (e) {
+        if (isCancelled) return;
         logger.error('Error adding event with timestamp', e, { type, packageId });
         errorTracking.captureException(e, { tags: { component: 'PackageHistory' } });
       }
@@ -257,9 +354,17 @@ export default function PackageHistory({ contract, packageId, provider }) {
         addEventWithTimestamp(evt, 'delivered');
       }
     };
+    
+    const onStatusUpdated = (id, oldStatus, newStatus, updater, evt) => {
+      logger.debug('PackageStatusUpdated event received', { id, packageId });
+      if (id?.toString() === String(packageId)) {
+        logger.info('Processing PackageStatusUpdated', { packageId, oldStatus, newStatus });
+        addEventWithTimestamp(evt, 'statusUpdated');
+      }
+    };
 
     // Store listeners for cleanup
-    eventListenersRef.current = [onCreated, onTransferred, onDelivered];
+    eventListenersRef.current = [onCreated, onTransferred, onDelivered, onStatusUpdated];
     
     // Listen to all events (not filtered)
     logger.debug('Setting up event listeners', {
@@ -270,6 +375,7 @@ export default function PackageHistory({ contract, packageId, provider }) {
     contract.on('PackageCreated', onCreated);
     contract.on('PackageTransferred', onTransferred);
     contract.on('PackageDelivered', onDelivered);
+    contract.on('PackageStatusUpdated', onStatusUpdated);
     
     // WebSocket integration for real-time updates
     if (websocketService.enabled) {
@@ -302,6 +408,7 @@ export default function PackageHistory({ contract, packageId, provider }) {
         contract.off('PackageCreated', onCreated);
         contract.off('PackageTransferred', onTransferred);
         contract.off('PackageDelivered', onDelivered);
+        contract.off('PackageStatusUpdated', onStatusUpdated);
       } catch (e) {
         logger.error('Error removing event listeners', e);
       }
@@ -319,7 +426,7 @@ export default function PackageHistory({ contract, packageId, provider }) {
       
       eventListenersRef.current = [];
     };
-  }, [contract, packageId, provider]);
+  }, [contract, packageId, publicClient, fetchEvents]);
 
   const formatEvent = (event) => {
     const ts = event.timestampMs ?? Date.now();
@@ -345,6 +452,18 @@ export default function PackageHistory({ contract, packageId, provider }) {
           icon: '✅',
           title: 'Package Delivered',
           description: `Delivered by ${event.args?.owner?.slice(0, 6)}...${event.args?.owner?.slice(-4)}`,
+          timestamp
+        };
+      case 'statusUpdated':
+        const statusNames = ['Created', 'In Transit', 'Delivered'];
+        const oldStatus = event.args?.oldStatus !== undefined ? Number(event.args.oldStatus) : null;
+        const newStatus = event.args?.newStatus !== undefined ? Number(event.args.newStatus) : null;
+        const oldStatusName = oldStatus !== null && oldStatus < statusNames.length ? statusNames[oldStatus] : 'Unknown';
+        const newStatusName = newStatus !== null && newStatus < statusNames.length ? statusNames[newStatus] : 'Unknown';
+        return {
+          icon: '🔄',
+          title: 'Status Updated',
+          description: `Status changed from ${oldStatusName} to ${newStatusName} by ${event.args?.updater?.slice(0, 6)}...${event.args?.updater?.slice(-4)}`,
           timestamp
         };
       default:
@@ -425,3 +544,8 @@ export default function PackageHistory({ contract, packageId, provider }) {
     </div>
   );
 }
+
+PackageHistory.propTypes = {
+  contract: PropTypes.object,
+  packageId: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+};

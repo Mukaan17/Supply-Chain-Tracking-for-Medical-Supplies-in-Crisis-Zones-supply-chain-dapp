@@ -15,7 +15,6 @@ module.exports = {
     'no-implied-eval': 'error',
     'no-new-func': 'error',
     'no-script-url': 'error',
-    'no-unsafe-innerHTML': 'warn',
     
     // Prevent console.log in production
     'no-console': process.env.NODE_ENV === 'production' ? ['error', { allow: ['warn', 'error'] }] : 'warn',
@@ -28,6 +27,14 @@ module.exports = {
     // React specific
     'react/prop-types': 'warn',
     'react-hooks/exhaustive-deps': 'warn',
+  },
+  env: {
+    es2021: true,
+    browser: true,
+    node: true,
+  },
+  globals: {
+    BigInt: 'readonly',
   },
   overrides: [
     {

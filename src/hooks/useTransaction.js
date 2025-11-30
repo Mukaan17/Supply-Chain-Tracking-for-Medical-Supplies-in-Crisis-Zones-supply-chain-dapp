@@ -5,7 +5,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { ethers } from 'ethers';
+// ethers not directly used in this hook
+// import { ethers } from 'ethers';
 import transactionManager from '../services/transactionManager';
 import logger from '../services/logging';
 import errorTracking from '../services/errorTracking';

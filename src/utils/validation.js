@@ -1,4 +1,5 @@
 // Validation utilities for the Supply Chain dApp
+import logger from '../services/logging';
 
 export const validateAddress = (address) => {
   if (!address) return 'Address is required';
@@ -18,8 +19,9 @@ export const validatePackageId = (id) => {
 
 export const validateDescription = (description) => {
   if (!description) return 'Description is required';
+  if (description.trim().length === 0) return 'Description cannot be empty';
   if (description.length < 3) return 'Description must be at least 3 characters';
-  if (description.length > 200) return 'Description must be less than 200 characters';
+  if (description.length > 500) return 'Description must be less than 500 characters';
   return null;
 };
 
@@ -33,7 +35,7 @@ export const copyToClipboard = async (text) => {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (err) {
-    console.error('Failed to copy to clipboard:', err);
+    logger.error('Failed to copy to clipboard', err);
     return false;
   }
 };

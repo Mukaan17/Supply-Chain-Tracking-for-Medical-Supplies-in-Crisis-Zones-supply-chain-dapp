@@ -6,7 +6,8 @@
 
 import logger from '../services/logging';
 import analytics from './analytics';
-import performanceMonitor from '../utils/performance';
+// performanceMonitor available if needed
+// import performanceMonitor from '../utils/performance';
 
 class MonitoringService {
   constructor() {

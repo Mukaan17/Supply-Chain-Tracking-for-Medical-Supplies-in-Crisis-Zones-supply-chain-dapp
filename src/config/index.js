@@ -10,6 +10,8 @@ const requiredEnvVars = [
   'REACT_APP_CONTRACT_ADDRESS',
 ];
 
+// optionalEnvVars available for documentation purposes
+// eslint-disable-next-line no-unused-vars
 const optionalEnvVars = [
   'REACT_APP_NETWORK',
   'REACT_APP_ENABLE_ANALYTICS',
@@ -66,7 +68,7 @@ const config = {
   // App info
   app: {
     name: 'Supply Chain Tracking dApp',
-    version: '2.0.0',
+    version: '3.0.0',
     environment: process.env.NODE_ENV || 'development',
   },
 

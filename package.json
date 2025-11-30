@@ -1,24 +1,37 @@
 {
   "name": "supply-chain-dapp",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "private": true,
   "repository": {
     "type": "git",
     "url": "https://github.com/Mukaan17/Supply-Chain-Tracking-for-Medical-Supplies-in-Crisis-Zones-supply-chain-dapp"
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-toast": "^1.2.15",
     "@sentry/react": "^7.91.0",
+    "@tanstack/react-query": "^5.90.11",
     "@testing-library/dom": "^10.4.1",
+    "autoprefixer": "^10.4.22",
     "ethers": "^6.15.0",
+    "framer-motion": "^11.18.2",
+    "lucide-react": "^0.300.0",
+    "postcss": "^8.5.6",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-scripts": "5.0.1",
+    "recharts": "^2.15.4",
+    "sonner": "^2.0.7",
+    "tailwindcss": "^3.4.18",
+    "viem": "^2.40.3",
+    "wagmi": "^2.19.5",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "start": "react-app-rewired start",
+    "build": "react-app-rewired build",
     "test": "react-scripts test",
     "test:coverage": "react-scripts test --coverage --watchAll=false",
     "test:e2e": "playwright test",
@@ -56,10 +69,16 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.0",
+    "@craco/craco": "^7.1.0",
     "@playwright/test": "^1.57.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
-    "identity-obj-proxy": "^3.0.0"
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "identity-obj-proxy": "^3.0.0",
+    "react-app-rewired": "^2.2.1",
+    "typescript": "^5.9.3"
   }
 }
