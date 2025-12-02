@@ -169,3 +169,82 @@ export function formatPackage(
   };
 }
 
+/**
+ * Format package from event data (PackageCreated + optional PackageStatusUpdated)
+ * This avoids the tuple decoding issue with getPackageDetails
+ */
+export function formatPackageFromEvents(
+  createdEvent: { 
+    id: bigint; 
+    description: string; 
+    creator: string; 
+    timestamp: bigint;
+  },
+  statusUpdate?: { 
+    newStatus: number | bigint; 
+    timestamp: bigint;
+  }
+): ParsedPackage {
+  const packageId = createdEvent.id.toString();
+  const statusNum = statusUpdate 
+    ? (typeof statusUpdate.newStatus === 'bigint' ? Number(statusUpdate.newStatus) : Number(statusUpdate.newStatus))
+    : 0; // Default to Manufacturing (0) if no status update
+  const statusLabel = STATUS_MAP[statusNum] || 'Manufacturing';
+  
+  const parsed = parseDescription(createdEvent.description);
+  
+  // Format timestamps
+  const formatTimestamp = (timestamp: bigint | number | null): string => {
+    if (!timestamp) return 'Unknown';
+    const ts = typeof timestamp === 'bigint' ? Number(timestamp) : timestamp;
+    if (ts === 0) return 'Unknown';
+    
+    const date = new Date(ts * 1000);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+    
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'min' : 'mins'} ago`;
+    if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+    if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+    
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  };
+
+  const createdTimestamp = Number(createdEvent.timestamp);
+  const createdStr = formatTimestamp(createdEvent.timestamp);
+  
+  // Use status update timestamp if available, otherwise use creation timestamp
+  const lastUpdatedTimestamp = statusUpdate 
+    ? Number(statusUpdate.timestamp)
+    : createdTimestamp;
+  const updatedStr = formatTimestamp(statusUpdate?.timestamp || createdEvent.timestamp);
+
+  return {
+    id: `MED-2025-${packageId.padStart(3, '0')}`,
+    description: parsed.description,
+    category: parsed.category || 'pharmaceuticals',
+    origin: parsed.origin || 'Unknown',
+    destination: parsed.destination || 'Unknown',
+    quantity: parsed.quantity || '1 unit',
+    temperature: undefined, // Not available from events
+    temperatureString: parsed.temperature, // From description parsing
+    expectedDate: parsed.expectedDate,
+    handler: parsed.handler,
+    notes: parsed.notes,
+    owner: createdEvent.creator, // Use creator as owner initially
+    status: statusLabel,
+    createdAt: createdStr,
+    createdAtTimestamp: createdTimestamp,
+    lastUpdate: updatedStr,
+    lastUpdatedAt: lastUpdatedTimestamp,
+  };
+}
+

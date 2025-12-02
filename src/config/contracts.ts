@@ -9,7 +9,7 @@ import contractABI from './contract-abi.json';
 // Contract addresses per network
 // These should be set via environment variables in production
 const contractAddresses: { [key: string]: string } = {
-  sepolia: process.env.REACT_APP_CONTRACT_ADDRESS_SEPOLIA || '',
+  sepolia: process.env.REACT_APP_CONTRACT_ADDRESS_SEPOLIA || '0x971EC5685f0FE4f5fC8F868586BCADC5Ec30819e',
   mainnet: process.env.REACT_APP_CONTRACT_ADDRESS_MAINNET || '',
   polygon: process.env.REACT_APP_CONTRACT_ADDRESS_POLYGON || '',
   arbitrum: process.env.REACT_APP_CONTRACT_ADDRESS_ARBITRUM || '',

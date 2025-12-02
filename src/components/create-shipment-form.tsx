@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Package,
   MapPin,
@@ -18,13 +18,12 @@ import { Address } from "viem";
 import { useToastWithNotifications } from "../hooks/useToastWithNotifications";
 
 interface CreateShipmentFormProps {
-  onCreateShipment: (shipment: any) => void;
+  onCreateShipment?: (shipment: any) => void;
   walletConnected: boolean;
   onNavigate?: (view: string) => void;
 }
 
 export function CreateShipmentForm({
-  onCreateShipment,
   walletConnected,
   onNavigate,
 }: CreateShipmentFormProps) {
@@ -43,6 +42,7 @@ export function CreateShipmentForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [showSuccess, setShowSuccess] = useState(false);
+  const processedTxHashRef = useRef<string | null>(null);
 
   const contractAddress = useContractAddress();
   const abi = getContractABI();
@@ -153,6 +153,8 @@ export function CreateShipmentForm({
     }
 
     try {
+      // Reset processed transaction hash when starting a new transaction
+      processedTxHashRef.current = null;
       writeContract({
         address: contractAddress as Address,
         abi,
@@ -167,6 +169,13 @@ export function CreateShipmentForm({
   // Handle successful transaction
   useEffect(() => {
     if (isConfirmed && writeData) {
+      // Prevent duplicate processing of the same transaction
+      const txHash = writeData;
+      if (processedTxHashRef.current === txHash) {
+        return;
+      }
+      
+      processedTxHashRef.current = txHash;
       setShowSuccess(true);
       toast.success("Shipment Created Successfully", {
         description: "Your shipment has been registered on the blockchain",
@@ -187,7 +196,8 @@ export function CreateShipmentForm({
       setErrors({});
       setTouched({});
     }
-  }, [isConfirmed, writeData, toast]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfirmed, writeData]);
 
   const handleChange = (
     e: React.ChangeEvent<

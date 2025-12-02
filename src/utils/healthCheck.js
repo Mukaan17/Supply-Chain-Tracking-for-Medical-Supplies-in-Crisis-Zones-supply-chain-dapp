@@ -125,10 +125,10 @@ class HealthCheckService {
     try {
       // Try to open a test database
       return new Promise((resolve) => {
-        const request = indexedDB.open('health_check_test', 1);
+        const request = window.indexedDB.open('health_check_test', 1);
         request.onsuccess = () => {
           request.result.close();
-          indexedDB.deleteDatabase('health_check_test');
+          window.indexedDB.deleteDatabase('health_check_test');
           resolve({ status: 'healthy', message: 'IndexedDB accessible' });
         };
         request.onerror = () => {

@@ -5,7 +5,7 @@
  * monitoring, and offline support.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Navigation } from './components/Navigation';
 import { DashboardView } from './components/dashboard-view';
 import { CreateShipmentForm } from './components/create-shipment-form';
@@ -117,6 +117,7 @@ function App() {
         });
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet.isConnected, wallet.account, wallet.network, contract.isReady]);
 
   // Handle offline status
@@ -175,16 +176,16 @@ function App() {
     }
   };
 
-  const handleCreateShipment = (formData: any) => {
+  const handleCreateShipment = (_formData: any) => {
     // When a package is created on blockchain, PackagesFetcher will automatically fetch it
     // This is just for UI feedback - actual creation happens in CreateShipmentForm
   };
 
-  const handlePackagesLoaded = (packages: ParsedPackage[]) => {
+  const handlePackagesLoaded = useCallback((packages: ParsedPackage[]) => {
     setShipments(packages);
     setIsLoadingShipments(false);
     setLastShipmentsUpdate(new Date());
-  };
+  }, []);
 
   const handleUpdateStatus = (
     id: string,

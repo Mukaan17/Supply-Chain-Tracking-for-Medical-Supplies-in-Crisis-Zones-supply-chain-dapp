@@ -100,13 +100,15 @@ class OfflineManager {
 
     // Persist to IndexedDB
     try {
+      await indexedDB.init();
       await indexedDB.set('offlineQueue', {
         key: 'queue',
         value: this.offlineQueue,
         timestamp: Date.now(),
       });
     } catch (error) {
-      logger.error('Failed to persist offline queue', error);
+      // Silently fail if IndexedDB is not available - offline mode will still work in memory
+      logger.debug('Failed to persist offline queue (IndexedDB may not be available)', error);
     }
 
     logger.info('Item added to offline queue', { queueSize: this.offlineQueue.length });
@@ -120,13 +122,16 @@ class OfflineManager {
     if (!this.enabled) return;
 
     try {
+      // Ensure IndexedDB is initialized before using it
+      await indexedDB.init();
       const stored = await indexedDB.get('offlineQueue', 'queue');
       if (stored && stored.value) {
         this.offlineQueue = stored.value;
         logger.info('Offline queue loaded', { queueSize: this.offlineQueue.length });
       }
     } catch (error) {
-      logger.error('Failed to load offline queue', error);
+      // Silently fail if IndexedDB is not available - offline mode will still work in memory
+      logger.debug('Failed to load offline queue (IndexedDB may not be available)', error);
     }
   }
 
@@ -164,9 +169,11 @@ class OfflineManager {
 
     // Clear persisted queue
     try {
+      await indexedDB.init();
       await indexedDB.delete('offlineQueue', 'queue');
     } catch (error) {
-      logger.error('Failed to clear offline queue', error);
+      // Silently fail if IndexedDB is not available
+      logger.debug('Failed to clear offline queue (IndexedDB may not be available)', error);
     }
 
     logger.info('Offline queue sync completed', {
@@ -188,9 +195,11 @@ class OfflineManager {
   async clearQueue() {
     this.offlineQueue = [];
     try {
+      await indexedDB.init();
       await indexedDB.delete('offlineQueue', 'queue');
     } catch (error) {
-      logger.error('Failed to clear offline queue', error);
+      // Silently fail if IndexedDB is not available
+      logger.debug('Failed to clear offline queue (IndexedDB may not be available)', error);
     }
     logger.info('Offline queue cleared');
   }
