@@ -85,7 +85,8 @@ export function ShipmentsList({
     }
   };
 
-  const filteredShipments = shipments.filter((shipment) => {
+  const filteredShipments = shipments
+    .filter((shipment) => {
     const matchesSearch =
       shipment.id
         .toLowerCase()
@@ -97,6 +98,30 @@ export function ShipmentsList({
       statusFilter === "all" ||
       shipment.status === statusFilter;
     return matchesSearch && matchesStatus;
+    })
+    .sort((a, b) => {
+      // Sort by newest first (highest timestamp/createdAt first)
+      // Try createdAt timestamp first, then fall back to other date fields
+      const aTime = a.createdAtTimestamp 
+        ? Number(a.createdAtTimestamp) 
+        : a.createdAt 
+          ? new Date(a.createdAt).getTime() 
+          : 0;
+      const bTime = b.createdAtTimestamp 
+        ? Number(b.createdAtTimestamp) 
+        : b.createdAt 
+          ? new Date(b.createdAt).getTime() 
+          : 0;
+      
+      // If timestamps are equal, sort by ID (newer IDs are typically higher)
+      if (aTime === bTime) {
+        // Extract numeric part from ID (e.g., "PHAR-2025-015" -> 15, "MED-2025-015" -> 15)
+        const aIdNum = parseInt(a.id?.match(/\d+$/)?.[0] || '0', 10);
+        const bIdNum = parseInt(b.id?.match(/\d+$/)?.[0] || '0', 10);
+        return bIdNum - aIdNum; // Higher ID = newer
+      }
+      
+      return bTime - aTime; // Newest first (descending order)
   });
 
   const handleExportCSV = () => {

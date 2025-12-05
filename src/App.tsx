@@ -182,7 +182,36 @@ function App() {
   };
 
   const handlePackagesLoaded = useCallback((packages: ParsedPackage[]) => {
-    setShipments(packages);
+    // Merge new packages with existing ones instead of replacing
+    // This ensures older packages aren't lost when only new packages are fetched
+    setShipments(prev => {
+      // Create a map for efficient lookup
+      const mergedMap = new Map<string, ParsedPackage>();
+      
+      // Add existing packages first
+      prev.forEach(pkg => {
+        mergedMap.set(pkg.id, pkg);
+      });
+      
+      // Track if anything actually changed
+      let hasChanges = false;
+      
+      // Add/update with new packages (newer data takes precedence)
+      packages.forEach(pkg => {
+        const existing = mergedMap.get(pkg.id);
+        if (!existing || existing.status !== pkg.status || existing.owner !== pkg.owner) {
+          mergedMap.set(pkg.id, pkg);
+          hasChanges = true;
+        }
+      });
+      
+      // Only return new array if there were actual changes
+      if (!hasChanges && prev.length === mergedMap.size) {
+        return prev; // Return same reference to prevent unnecessary re-renders
+      }
+      
+      return Array.from(mergedMap.values());
+    });
     setIsLoadingShipments(false);
     setLastShipmentsUpdate(new Date());
   }, []);
@@ -224,10 +253,9 @@ function App() {
 
   const handleRefresh = async () => {
     setIsLoadingShipments(true);
-    // Trigger refresh by clearing and refetching
-    // PackagesFetcher will automatically refetch when wallet/contract changes
-    setShipments([]);
-    // The PackagesFetcher will reload automatically
+    // Don't clear shipments - let PackagesFetcher merge new data with existing
+    // PackagesFetcher will refetch and merge, preserving existing packages
+    // The PackagesFetcher will reload automatically via its useEffect
   };
 
   const selectedShipment = shipments.find(

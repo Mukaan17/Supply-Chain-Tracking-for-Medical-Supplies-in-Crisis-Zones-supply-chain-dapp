@@ -33,6 +33,75 @@ const STATUS_MAP: { [key: number]: string } = {
 };
 
 /**
+ * Get category prefix for shipment ID generation
+ * Maps category names to short prefixes (e.g., "Pharmaceuticals" -> "PHAR")
+ */
+function getCategoryPrefix(category?: string): string {
+  if (!category) return 'MED'; // Default fallback
+  
+  const categoryLower = category.toLowerCase().trim();
+  
+  // Map common category names to prefixes
+  const categoryMap: { [key: string]: string } = {
+    'pharmaceuticals': 'PHAR',
+    'pharmaceutical': 'PHAR',
+    'medical equipment': 'EQUIP',
+    'equipment': 'EQUIP',
+    'medical supplies': 'SUPPLY',
+    'supplies': 'SUPPLY',
+    'vaccines': 'VACC',
+    'vaccine': 'VACC',
+    'blood products': 'BLOOD',
+    'blood': 'BLOOD',
+    'surgical instruments': 'SURG',
+    'surgical': 'SURG',
+    'diagnostic equipment': 'DIAG',
+    'diagnostic': 'DIAG',
+    'personal protective equipment': 'PPE',
+    'ppe': 'PPE',
+    'medications': 'MED',
+    'medication': 'MED',
+  };
+  
+  // Check for exact match first
+  if (categoryMap[categoryLower]) {
+    return categoryMap[categoryLower];
+  }
+  
+  // Check for partial matches
+  for (const [key, prefix] of Object.entries(categoryMap)) {
+    if (categoryLower.includes(key) || key.includes(categoryLower)) {
+      return prefix;
+    }
+  }
+  
+  // If no match, generate prefix from first 4 uppercase letters of category
+  const words = category.split(/\s+/);
+  if (words.length > 1) {
+    // Multi-word: take first letter of each word (up to 4)
+    return words.slice(0, 4).map(w => w.charAt(0).toUpperCase()).join('');
+  } else {
+    // Single word: take first 4 uppercase letters
+    return category.slice(0, 4).toUpperCase().padEnd(4, 'X');
+  }
+}
+
+/**
+ * Generate shipment ID from category, year, and package ID
+ * Format: {CATEGORY_PREFIX}-{YEAR}-{PACKAGE_ID}
+ * Example: PHAR-2025-001, EQUIP-2025-042
+ */
+function generateShipmentId(
+  category: string | undefined,
+  year: number,
+  packageId: string
+): string {
+  const prefix = getCategoryPrefix(category);
+  const paddedId = packageId.padStart(3, '0');
+  return `${prefix}-${year}-${paddedId}`;
+}
+
+/**
  * Parse a description string into structured fields
  */
 export function parseDescription(description: string): {
@@ -148,10 +217,17 @@ export function formatPackage(
     ? (typeof createdAt === 'bigint' ? Number(createdAt) : createdAt)
     : undefined;
 
+  // Extract year from timestamp or use current year as fallback
+  const year = createdAtTimestamp 
+    ? new Date(createdAtTimestamp * 1000).getFullYear()
+    : new Date().getFullYear();
+  
+  const category = parsed.category || 'pharmaceuticals';
+
   return {
-    id: `MED-2025-${packageId.padStart(3, '0')}`,
+    id: generateShipmentId(category, year, packageId),
     description: parsed.description,
-    category: parsed.category || 'pharmaceuticals',
+    category: category,
     origin: parsed.origin || 'Unknown',
     destination: parsed.destination || 'Unknown',
     quantity: parsed.quantity || '1 unit',
@@ -183,7 +259,9 @@ export function formatPackageFromEvents(
   statusUpdate?: { 
     newStatus: number | bigint; 
     timestamp: bigint;
-  }
+  },
+  temperature?: number,
+  currentOwner?: string // Current owner from PackageTransferred events, defaults to creator
 ): ParsedPackage {
   const packageId = createdEvent.id.toString();
   const statusNum = statusUpdate 
@@ -227,19 +305,26 @@ export function formatPackageFromEvents(
     : createdTimestamp;
   const updatedStr = formatTimestamp(statusUpdate?.timestamp || createdEvent.timestamp);
 
+  // Extract year from creation timestamp
+  const year = createdTimestamp > 0
+    ? new Date(createdTimestamp * 1000).getFullYear()
+    : new Date().getFullYear();
+  
+  const category = parsed.category || 'pharmaceuticals';
+
   return {
-    id: `MED-2025-${packageId.padStart(3, '0')}`,
+    id: generateShipmentId(category, year, packageId),
     description: parsed.description,
-    category: parsed.category || 'pharmaceuticals',
+    category: category,
     origin: parsed.origin || 'Unknown',
     destination: parsed.destination || 'Unknown',
     quantity: parsed.quantity || '1 unit',
-    temperature: undefined, // Not available from events
+    temperature: temperature, // From TemperatureUpdated events
     temperatureString: parsed.temperature, // From description parsing
     expectedDate: parsed.expectedDate,
     handler: parsed.handler,
     notes: parsed.notes,
-    owner: createdEvent.creator, // Use creator as owner initially
+    owner: currentOwner || createdEvent.creator, // Use current owner from transfers, or creator if never transferred
     status: statusLabel,
     createdAt: createdStr,
     createdAtTimestamp: createdTimestamp,

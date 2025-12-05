@@ -26,6 +26,17 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
   const lastPackagesRef = useRef<string>('');
   const lastFetchTimeRef = useRef<number>(0);
   const fetchDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastContractAddressRef = useRef<string | null>(null);
+  
+  // Memoize onPackagesLoaded to prevent infinite loops
+  // This ensures the callback reference is stable even if the parent component re-renders
+  const stableOnPackagesLoaded = useCallback((packagesArray: ParsedPackage[]) => {
+    onPackagesLoaded(packagesArray);
+  }, [onPackagesLoaded]);
+  
+  // Debounce timer for notifying parent to prevent rapid-fire updates
+  const notifyParentTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isNotifyingRef = useRef(false); // Guard to prevent concurrent notifications
 
   // Get total packages for monitoring (optional, used for logging)
   // Removed refetchInterval to reduce rate limiting - rely on event watcher instead
@@ -39,35 +50,131 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     },
   });
 
-  // Watch for PackageCreated events to trigger refetch (with debouncing)
+  // Watch for PackageCreated events to immediately add new packages
   useWatchContractEvent({
     address: contractAddress as Address | undefined,
     abi,
     eventName: 'PackageCreated',
     onLogs(logs) {
       if (logs && logs.length > 0) {
-        logger.info('PackageCreated event detected, scheduling refetch', { 
+        logger.info('PackageCreated event detected, processing immediately', { 
           eventCount: logs.length,
         });
         
+        // Parse and add new packages immediately (no debounce for new packages)
+        try {
+          const createdEvents = parseEventLogs({
+            abi: abi as any,
+            eventName: 'PackageCreated',
+            logs: logs as any[],
+            strict: false,
+          }) as any[];
+          
+          if (createdEvents.length > 0) {
+            // Add new packages immediately to the map
+            setPackages(prev => {
+              const updated = new Map(prev);
+              const newPackages: ParsedPackage[] = [];
+              let addedCount = 0;
+              
+              for (const event of createdEvents) {
+                if (event.args && 'id' in event.args && 'description' in event.args && 'creator' in event.args && 'timestamp' in event.args) {
+                  const id = event.args.id as bigint;
+                  const description = event.args.description as string;
+                  const creator = event.args.creator as string;
+                  const timestamp = event.args.timestamp as bigint;
+                  
+                  const parsedPackage = formatPackageFromEvents(
+                    { id, description, creator, timestamp },
+                    undefined, // No status update yet
+                    undefined  // No temperature update yet
+                  );
+                  
+                  // Only add if not already present
+                  if (!updated.has(parsedPackage.id)) {
+                    updated.set(parsedPackage.id, parsedPackage);
+                    newPackages.push(parsedPackage);
+                    addedCount++;
+                    logger.info('Added new package from event', { 
+                      packageId: parsedPackage.id,
+                      description: parsedPackage.description,
+                    });
+                  }
+                }
+              }
+              
+              if (addedCount > 0) {
+                logger.info('Immediately added new packages from PackageCreated events', { 
+                  addedCount,
+                  totalPackages: updated.size,
+                });
+                
+                // Immediately notify parent of new packages (bypass debounce for real-time updates)
+                // Merge with existing packages and notify immediately
+                const allPackages = Array.from(updated.values());
+                
+                // Clear any pending debounced notification
+                if (notifyParentTimerRef.current) {
+                  clearTimeout(notifyParentTimerRef.current);
+                  notifyParentTimerRef.current = null;
+                }
+                
+                // Update the last packages ref to prevent duplicate notification
+                const packagesKey = allPackages.map(p => `${p.id}:${p.status}`).sort().join('|');
+                lastPackagesRef.current = packagesKey;
+                
+                // Set notification guard to prevent useEffect from also notifying
+                isNotifyingRef.current = true;
+                
+                // Notify immediately (no debounce for new packages)
+                setTimeout(() => {
+                  try {
+                    logger.info('Immediately notifying parent of new packages', { 
+                      newCount: addedCount,
+                      totalCount: allPackages.length,
+                    });
+                    stableOnPackagesLoaded(allPackages);
+                  } catch (error: any) {
+                    logger.error('Error immediately notifying parent of new packages', error, {
+                      errorMessage: error?.message || String(error),
+                    });
+                  } finally {
+                    // Clear notification guard after a short delay to allow useEffect to see the updated state
+                    setTimeout(() => {
+                      isNotifyingRef.current = false;
+                    }, 100);
+                  }
+                }, 0); // Use setTimeout(0) to ensure state update completes first
+              }
+              
+              return updated;
+            });
+          }
+        } catch (err: any) {
+          logger.warn('Error parsing PackageCreated events for immediate display', {
+            error: err?.message || String(err),
+          });
+        }
+        
+        // Also schedule a full refetch to get status updates and ensure everything is in sync
         // Debounce: clear any existing timer
         if (fetchDebounceTimerRef.current) {
           clearTimeout(fetchDebounceTimerRef.current);
         }
         
-        // Schedule refetch after 3 seconds (debounce multiple events, reduced from 5s)
+        // Schedule refetch after 2 seconds to get status updates and temperature data
         fetchDebounceTimerRef.current = setTimeout(() => {
           const now = Date.now();
-          // Only fetch if at least 5 seconds have passed since last fetch (reduced from 10s)
-          if (now - lastFetchTimeRef.current > 5000) {
-            logger.info('Debounced refetch triggered');
+          // Only fetch if at least 3 seconds have passed since last fetch
+          if (now - lastFetchTimeRef.current > 3000) {
+            logger.info('Debounced refetch triggered after new package creation');
             fetchPackagesFromEvents();
           } else {
             logger.debug('Skipping refetch - too soon since last fetch', {
               timeSinceLastFetch: now - lastFetchTimeRef.current,
             });
           }
-        }, 3000);
+        }, 2000);
       }
     },
   });
@@ -77,6 +184,8 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     LAST_BLOCK: `lastFetchedBlock_${contractAddress}`,
     CREATED_EVENTS: `createdEvents_${contractAddress}`,
     STATUS_EVENTS: `statusEvents_${contractAddress}`,
+    TEMPERATURE_EVENTS: `temperatureEvents_${contractAddress}`,
+    TRANSFER_EVENTS: `transferEvents_${contractAddress}`,
     PACKAGES: `packages_${contractAddress}`,
   };
 
@@ -85,6 +194,7 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     await cacheService.delete(CACHE_KEYS.LAST_BLOCK, 'packages');
     await cacheService.delete(CACHE_KEYS.CREATED_EVENTS, 'packages');
     await cacheService.delete(CACHE_KEYS.STATUS_EVENTS, 'packages');
+    await cacheService.delete(CACHE_KEYS.TEMPERATURE_EVENTS, 'packages');
     await cacheService.delete(CACHE_KEYS.PACKAGES, 'packages');
     logger.info('Package cache cleared');
   };
@@ -100,9 +210,9 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     if (deploymentBlock) {
       return BigInt(deploymentBlock);
     }
-    // Known deployment block for Sepolia contract 0x971EC5685f0FE4f5fC8F868586BCADC5Ec30819e
-    // First transaction was at block 9734643
-    return 9734643n;
+    // Known deployment block for Sepolia contract 0x2e3C73D03d55424F509995AC8D47E187Cd3195fe
+    // Start searching from block 9772925 (exact deployment block)
+    return 9772925n;
   };
 
   // Fetch logs in chunks to avoid RPC block range limits
@@ -112,7 +222,7 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     fromBlock: bigint,
     toBlock: bigint,
     chunkSize: bigint = 999n, // thirdweb limit is 1000 blocks, using 999 for safety
-    requestDelay: number = 200, // Reduced to 200ms - was 500ms, now that it's working we can be faster
+    requestDelay: number = 250, // 250ms delay to avoid rate limiting
     onChunkFetched?: (logs: any[]) => void // Callback for progressive loading
   ): Promise<any[]> => {
     const allLogs: any[] = [];
@@ -120,60 +230,82 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     let consecutiveErrors = 0;
     const maxConsecutiveErrors = 3;
     
+    // Optimized: Fetch chunks in parallel batches for better throughput
+    // while maintaining safe delays between batches to avoid rate limiting
+    const BATCH_SIZE = 3; // Fetch 3 chunks in parallel per batch
+    
     while (currentFrom <= toBlock) {
-      const currentTo = currentFrom + chunkSize > toBlock 
-        ? toBlock 
-        : currentFrom + chunkSize;
+      // Prepare a batch of chunks to fetch in parallel
+      const batchPromises: Array<Promise<{ logs: any[]; from: bigint; to: bigint }>> = [];
+      const batchRanges: Array<{ from: bigint; to: bigint }> = [];
       
+      for (let i = 0; i < BATCH_SIZE && currentFrom <= toBlock; i++) {
+        const chunkFrom = currentFrom;
+        const chunkTo = currentFrom + chunkSize > toBlock 
+          ? toBlock 
+          : currentFrom + chunkSize;
+        
+        batchRanges.push({ from: chunkFrom, to: chunkTo });
+        
+        // Create promise for this chunk
+        batchPromises.push(
+          (async () => {
+            try {
+              const chunkLogs = await publicClient!.getLogs({
+                address: contractAddress as Address,
+                event: eventDef as any,
+                fromBlock: chunkFrom,
+                toBlock: chunkTo,
+              });
+              
+              return { logs: chunkLogs, from: chunkFrom, to: chunkTo };
+            } catch (err: any) {
+              logger.warn('Error fetching chunk in batch', {
+                fromBlock: chunkFrom.toString(),
+                toBlock: chunkTo.toString(),
+                error: err?.message || String(err),
+              });
+              return { logs: [], from: chunkFrom, to: chunkTo };
+            }
+          })()
+        );
+        
+        currentFrom = chunkTo + 1n;
+      }
+      
+      // Fetch batch in parallel
       try {
-        logger.debug('Fetching events chunk', {
-          fromBlock: currentFrom.toString(),
-          toBlock: currentTo.toString(),
-          chunkSize: (currentTo - currentFrom + 1n).toString(),
-        });
+        const batchResults = await Promise.all(batchPromises);
         
-        // Fetch logs with the event definition
-        const chunkLogs = await publicClient!.getLogs({
-          address: contractAddress as Address,
-          event: eventDef as any,
-          fromBlock: currentFrom,
-          toBlock: currentTo,
-        });
-        
-        allLogs.push(...chunkLogs);
-        consecutiveErrors = 0; // Reset error counter on success
-        
-        // Call callback for progressive loading if provided
-        if (onChunkFetched && chunkLogs.length > 0) {
-          onChunkFetched(chunkLogs);
+        // Process batch results
+        for (const result of batchResults) {
+          allLogs.push(...result.logs);
+          consecutiveErrors = 0; // Reset error counter on success
+          
+          // Call callback for progressive loading if provided
+          if (onChunkFetched && result.logs.length > 0) {
+            onChunkFetched(result.logs);
+          }
+          
+          // Log results
+          if (result.logs.length > 0) {
+            logger.info('Chunk fetched with events!', { 
+              chunkLogsCount: result.logs.length,
+              totalLogsCount: allLogs.length,
+              fromBlock: result.from.toString(),
+              toBlock: result.to.toString(),
+            });
+          } else {
+            logger.debug('Chunk fetched (no events)', { 
+              chunkLogsCount: 0,
+              totalLogsCount: allLogs.length,
+              fromBlock: result.from.toString(),
+              toBlock: result.to.toString(),
+            });
+          }
         }
         
-        // More detailed logging to debug why no events are found
-        if (chunkLogs.length > 0) {
-          logger.info('Chunk fetched with events!', { 
-            chunkLogsCount: chunkLogs.length,
-            totalLogsCount: allLogs.length,
-            fromBlock: currentFrom.toString(),
-            toBlock: currentTo.toString(),
-            sampleLog: chunkLogs[0] ? {
-              blockNumber: chunkLogs[0].blockNumber?.toString(),
-              transactionHash: chunkLogs[0].transactionHash,
-            } : null,
-          });
-        } else {
-          logger.debug('Chunk fetched (no events)', { 
-            chunkLogsCount: 0,
-            totalLogsCount: allLogs.length,
-            fromBlock: currentFrom.toString(),
-            toBlock: currentTo.toString(),
-            contractAddress,
-          });
-        }
-        
-        // Move to next chunk
-        currentFrom = currentTo + 1n;
-        
-        // Delay between requests to avoid rate limiting
+        // Delay between batches to avoid rate limiting
         if (currentFrom <= toBlock) {
           await new Promise(resolve => setTimeout(resolve, requestDelay));
         }
@@ -185,12 +317,11 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
                            errorMessage.includes('rate limit') ||
                            errorMessage.includes('CORS');
         
-        logger.warn('Error fetching event chunk', {
-          fromBlock: currentFrom.toString(),
-          toBlock: currentTo.toString(),
+        logger.warn('Error fetching batch of chunks', {
           error: errorMessage,
           isRateLimit,
           consecutiveErrors,
+          currentFrom: currentFrom.toString(),
         });
         
         // If rate limited, wait longer before retrying
@@ -209,8 +340,6 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
           break;
         }
         
-        // Continue with next chunk even if one fails
-        currentFrom = currentTo + 1n;
         // Add delay even on error to avoid hammering RPC
         if (currentFrom <= toBlock) {
           await new Promise(resolve => setTimeout(resolve, requestDelay * 2)); // Longer delay on error
@@ -292,11 +421,18 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
       const packageStatusUpdatedEventAbi = abi.find(
         (item: any) => item.type === 'event' && item.name === 'PackageStatusUpdated'
       );
+      const packageTransferredEventAbi = abi.find(
+        (item: any) => item.type === 'event' && item.name === 'PackageTransferred'
+      );
+      const temperatureUpdatedEventAbi = abi.find(
+        (item: any) => item.type === 'event' && item.name === 'TemperatureUpdated'
+      );
 
       if (!packageCreatedEventAbi || !packageStatusUpdatedEventAbi) {
         logger.error('Event definitions not found in ABI', null, {
           hasPackageCreated: !!packageCreatedEventAbi,
           hasPackageStatusUpdated: !!packageStatusUpdatedEventAbi,
+          hasTemperatureUpdated: !!temperatureUpdatedEventAbi,
         });
         setPackages(new Map());
         return;
@@ -305,6 +441,8 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
       // Use the ABI items directly - viem should handle them
       const packageCreatedEvent = packageCreatedEventAbi;
       const packageStatusUpdatedEvent = packageStatusUpdatedEventAbi;
+      const packageTransferredEvent = packageTransferredEventAbi;
+      const temperatureUpdatedEvent = temperatureUpdatedEventAbi;
       
       logger.info('Event definitions found', {
         packageCreated: {
@@ -326,18 +464,36 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
       // Load cached raw logs if this is a full refresh (startBlock === deploymentBlock)
       let cachedCreatedLogs: any[] = [];
       let cachedStatusLogs: any[] = [];
+      let cachedTemperatureLogs: any[] = [];
+      let cachedTransferLogs: any[] = [];
       
       if (startBlock === deploymentBlock) {
         const cachedCreated = await cacheService.get(CACHE_KEYS.CREATED_EVENTS, 'packages') as any[] | null;
         const cachedStatus = await cacheService.get(CACHE_KEYS.STATUS_EVENTS, 'packages') as any[] | null;
+        const cachedTemperature = await cacheService.get(CACHE_KEYS.TEMPERATURE_EVENTS, 'packages') as any[] | null;
+        const cachedTransfer = await cacheService.get(CACHE_KEYS.TRANSFER_EVENTS, 'packages') as any[] | null;
         
         if (cachedCreated && cachedStatus && cachedCreated.length > 0) {
+          if (cachedTemperature) {
+            cachedTemperatureLogs = cachedTemperature;
+          }
+          if (cachedTransfer) {
+            cachedTransferLogs = cachedTransfer;
+          }
           logger.info('Loading cached events', {
             createdCount: cachedCreated.length,
             statusCount: cachedStatus.length,
+            temperatureCount: cachedTemperature?.length || 0,
+            transferCount: cachedTransfer?.length || 0,
           });
           cachedCreatedLogs = cachedCreated;
           cachedStatusLogs = cachedStatus;
+          if (cachedTemperature) {
+            cachedTemperatureLogs = cachedTemperature;
+          }
+          if (cachedTransfer) {
+            cachedTransferLogs = cachedTransfer;
+          }
           
           // Immediately parse and display cached packages for instant UI update
           try {
@@ -355,6 +511,15 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
               strict: false,
             }) as any[];
             
+            const cachedTemperatureEvents = cachedTemperatureLogs.length > 0
+              ? (parseEventLogs({
+                  abi: abi as any,
+                  eventName: 'TemperatureUpdated',
+                  logs: cachedTemperatureLogs,
+                  strict: false,
+                }) as any[])
+              : [];
+            
             // Build status map
             const statusMap = new Map<bigint, { newStatus: bigint; timestamp: bigint }>();
             for (const event of cachedStatusEvents) {
@@ -365,6 +530,21 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
                 const existing = statusMap.get(id);
                 if (!existing || timestamp > existing.timestamp) {
                   statusMap.set(id, { newStatus, timestamp });
+    }
+              }
+            }
+            
+            // Build temperature map
+            const temperatureMap = new Map<bigint, { temperature: number; timestamp: bigint }>();
+            for (const event of cachedTemperatureEvents) {
+              if (event.args && 'id' in event.args && 'newTemperature' in event.args && 'timestamp' in event.args) {
+                const id = event.args.id as bigint;
+                const newTemperature = event.args.newTemperature as bigint | number;
+                const timestamp = event.args.timestamp as bigint;
+                const tempValue = typeof newTemperature === 'bigint' ? Number(newTemperature) : newTemperature;
+                const existing = temperatureMap.get(id);
+                if (!existing || timestamp > existing.timestamp) {
+                  temperatureMap.set(id, { temperature: tempValue, timestamp });
                 }
               }
             }
@@ -378,10 +558,12 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
                 const creator = event.args.creator as string;
                 const timestamp = event.args.timestamp as bigint;
                 const statusUpdate = statusMap.get(id);
+                const temperatureUpdate = temperatureMap.get(id);
                 
                 const parsedPackage = formatPackageFromEvents(
                   { id, description, creator, timestamp },
-                  statusUpdate ? { newStatus: statusUpdate.newStatus, timestamp: statusUpdate.timestamp } : undefined
+                  statusUpdate ? { newStatus: statusUpdate.newStatus, timestamp: statusUpdate.timestamp } : undefined,
+                  temperatureUpdate ? temperatureUpdate.temperature : undefined
                 );
                 
                 cachedPackagesMap.set(parsedPackage.id, parsedPackage);
@@ -404,35 +586,288 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
       // Fetch new events only if there are new blocks
       let newCreatedLogs: any[] = [];
       let newStatusLogs: any[] = [];
+      let newTemperatureLogs: any[] = [];
+      let newTransferLogs: any[] = [];
       
       if (startBlock <= currentBlock) {
-        // Fetch PackageCreated events in chunks (only new blocks)
-        logger.info('Fetching new PackageCreated events in chunks', {
-          fromBlock: startBlock.toString(),
-          toBlock: currentBlock.toString(),
-          chunkSize: '9999',
-        });
-        newCreatedLogs = await fetchLogsChunked(
-          packageCreatedEvent,
-          startBlock,
-          currentBlock,
-          999n, // 999 blocks per chunk (thirdweb's 1000 block limit, using 999 for safety)
-          200   // Reduced to 200ms delay (was 500ms) - faster now that it's working
-        );
-
-        // Fetch PackageStatusUpdated events in chunks (only new blocks)
-        logger.info('Fetching new PackageStatusUpdated events in chunks', {
-          fromBlock: startBlock.toString(),
-          toBlock: currentBlock.toString(),
-          chunkSize: '999',
-        });
-        newStatusLogs = await fetchLogsChunked(
-          packageStatusUpdatedEvent,
-          startBlock,
-          currentBlock,
-          999n, // 999 blocks per chunk (thirdweb's 1000 block limit, using 999 for safety)
-          200   // Reduced to 200ms delay (was 500ms) - faster now that it's working
-        );
+        const blockRange = currentBlock - startBlock;
+        const RECENT_BLOCKS = 10000n; // Fetch last 10k blocks first for faster initial load
+        
+        // Strategy: If range is large, fetch recent blocks first, then backfill
+        // This gets packages to the UI faster
+        if (blockRange > RECENT_BLOCKS && startBlock === deploymentBlock) {
+          // First pass: Fetch recent blocks (last 10k) for fast initial display
+          const recentStartBlock = currentBlock > RECENT_BLOCKS 
+            ? currentBlock - RECENT_BLOCKS 
+            : startBlock;
+          
+          logger.info('Fast initial fetch: Fetching recent blocks first', {
+            fromBlock: recentStartBlock.toString(),
+            toBlock: currentBlock.toString(),
+            strategy: 'recent-first',
+          });
+          
+          // Fetch all event types in parallel for recent blocks (much faster)
+          // 250ms delay to avoid rate limiting
+          const [recentCreated, recentStatus, recentTemp, recentTransfer] = await Promise.all([
+            fetchLogsChunked(
+              packageCreatedEvent,
+              recentStartBlock,
+              currentBlock,
+              999n,
+              250  // 250ms delay to avoid rate limiting
+            ),
+            fetchLogsChunked(
+              packageStatusUpdatedEvent,
+              recentStartBlock,
+              currentBlock,
+              999n,
+              250
+            ),
+            temperatureUpdatedEvent 
+              ? fetchLogsChunked(
+                  temperatureUpdatedEvent,
+                  recentStartBlock,
+                  currentBlock,
+                  999n,
+                  250
+                )
+              : Promise.resolve([]),
+            packageTransferredEvent
+              ? fetchLogsChunked(
+                  packageTransferredEvent,
+                  recentStartBlock,
+                  currentBlock,
+                  999n,
+                  250
+                )
+              : Promise.resolve([]),
+          ]);
+          
+          newCreatedLogs.push(...recentCreated);
+          newStatusLogs.push(...recentStatus);
+          newTemperatureLogs.push(...recentTemp);
+          newTransferLogs.push(...recentTransfer);
+          
+          // If we found events in recent blocks, parse and display immediately
+          if (recentCreated.length > 0 || recentStatus.length > 0) {
+            logger.info('Found events in recent blocks, parsing and displaying immediately', {
+              createdCount: recentCreated.length,
+              statusCount: recentStatus.length,
+            });
+            
+            // Parse recent events immediately for fast display
+            try {
+              const recentCreatedEvents = parseEventLogs({
+                abi: abi as any,
+                eventName: 'PackageCreated',
+                logs: recentCreated,
+                strict: false,
+              }) as any[];
+              
+              const recentStatusEvents = parseEventLogs({
+                abi: abi as any,
+                eventName: 'PackageStatusUpdated',
+                logs: recentStatus,
+                strict: false,
+              }) as any[];
+              
+              const recentTempEvents = recentTemp.length > 0
+                ? (parseEventLogs({
+                    abi: abi as any,
+                    eventName: 'TemperatureUpdated',
+                    logs: recentTemp,
+                    strict: false,
+                  }) as any[])
+                : [];
+              
+              // Build status and temperature maps from recent events
+              const recentStatusMap = new Map<bigint, { newStatus: bigint; timestamp: bigint }>();
+              for (const event of recentStatusEvents) {
+                if (event.args && 'id' in event.args && 'newStatus' in event.args && 'timestamp' in event.args) {
+                  const id = event.args.id as bigint;
+                  const newStatus = event.args.newStatus as bigint;
+                  const timestamp = event.args.timestamp as bigint;
+                  const existing = recentStatusMap.get(id);
+                  if (!existing || timestamp > existing.timestamp) {
+                    recentStatusMap.set(id, { newStatus, timestamp });
+                  }
+                }
+              }
+              
+              const recentTempMap = new Map<bigint, { temperature: number; timestamp: bigint }>();
+              for (const event of recentTempEvents) {
+                if (event.args && 'id' in event.args && 'newTemperature' in event.args && 'timestamp' in event.args) {
+                  const id = event.args.id as bigint;
+                  const newTemperature = event.args.newTemperature as bigint | number;
+                  const timestamp = event.args.timestamp as bigint;
+                  const tempValue = typeof newTemperature === 'bigint' ? Number(newTemperature) : newTemperature;
+                  const existing = recentTempMap.get(id);
+                  if (!existing || timestamp > existing.timestamp) {
+                    recentTempMap.set(id, { temperature: tempValue, timestamp });
+                  }
+                }
+              }
+              
+              // Build owner map from recent transfer events
+              const recentTransferEvents = recentTransfer.length > 0
+                ? (parseEventLogs({
+                    abi: abi as any,
+                    eventName: 'PackageTransferred',
+                    logs: recentTransfer,
+                    strict: false,
+                  }) as any[])
+                : [];
+              
+              const recentTransferMap = new Map<bigint, { owner: string; timestamp: bigint }>();
+              for (const event of recentTransferEvents) {
+                if (event.args && 'id' in event.args && 'to' in event.args && 'timestamp' in event.args) {
+                  const id = event.args.id as bigint;
+                  const to = event.args.to as string;
+                  const timestamp = event.args.timestamp as bigint;
+                  const existing = recentTransferMap.get(id);
+                  if (!existing || timestamp > existing.timestamp) {
+                    recentTransferMap.set(id, { owner: to, timestamp });
+                  }
+                }
+              }
+              
+              // Build packages from recent events and display immediately
+              const recentPackagesMap = new Map<string, ParsedPackage>();
+              for (const event of recentCreatedEvents) {
+                if (event.args && 'id' in event.args && 'description' in event.args && 'creator' in event.args && 'timestamp' in event.args) {
+                  const id = event.args.id as bigint;
+                  const description = event.args.description as string;
+                  const creator = event.args.creator as string;
+                  const timestamp = event.args.timestamp as bigint;
+                  const statusUpdate = recentStatusMap.get(id);
+                  const temperatureUpdate = recentTempMap.get(id);
+                  
+                  const parsedPackage = formatPackageFromEvents(
+                    { id, description, creator, timestamp },
+                    statusUpdate ? { newStatus: statusUpdate.newStatus, timestamp: statusUpdate.timestamp } : undefined,
+                    temperatureUpdate ? temperatureUpdate.temperature : undefined
+                  );
+                  
+                  recentPackagesMap.set(parsedPackage.id, parsedPackage);
+                }
+              }
+              
+              if (recentPackagesMap.size > 0) {
+                logger.info('Displaying packages from recent blocks immediately', { count: recentPackagesMap.size });
+                // Merge with existing packages and update UI immediately
+      setPackages(prev => {
+                  const merged = new Map(prev);
+                  recentPackagesMap.forEach((pkg, id) => merged.set(id, pkg));
+                  return merged;
+                });
+              }
+            } catch (err: any) {
+              logger.warn('Error parsing recent events for immediate display', {
+                error: err?.message || String(err),
+              });
+            }
+          }
+          
+          // Second pass: Backfill older blocks (if needed)
+          if (recentStartBlock > startBlock) {
+            logger.info('Backfilling older blocks in background', {
+              fromBlock: startBlock.toString(),
+              toBlock: (recentStartBlock - 1n).toString(),
+            });
+            
+            // Fetch older blocks in parallel (still efficient, less urgent)
+            // 250ms delay to avoid rate limiting
+            const [olderCreated, olderStatus, olderTemp, olderTransfer] = await Promise.all([
+              fetchLogsChunked(
+                packageCreatedEvent,
+                startBlock,
+                recentStartBlock - 1n,
+                999n,
+                250  // 250ms delay to avoid rate limiting
+              ),
+              fetchLogsChunked(
+                packageStatusUpdatedEvent,
+                startBlock,
+                recentStartBlock - 1n,
+                999n,
+                250
+              ),
+              temperatureUpdatedEvent
+                ? fetchLogsChunked(
+                    temperatureUpdatedEvent,
+                    startBlock,
+                    recentStartBlock - 1n,
+                    999n,
+                    250
+                  )
+                : Promise.resolve([]),
+              packageTransferredEvent
+                ? fetchLogsChunked(
+                    packageTransferredEvent,
+                    startBlock,
+                    recentStartBlock - 1n,
+                    999n,
+                    250
+                  )
+                : Promise.resolve([]),
+            ]);
+            
+            newCreatedLogs.push(...olderCreated);
+            newStatusLogs.push(...olderStatus);
+            newTemperatureLogs.push(...olderTemp);
+            newTransferLogs.push(...olderTransfer);
+          }
+        } else {
+          // Small range or incremental update: fetch normally but in parallel
+          logger.info('Fetching events in parallel for faster loading', {
+            fromBlock: startBlock.toString(),
+            toBlock: currentBlock.toString(),
+            chunkSize: '999',
+          });
+          
+          // Fetch all event types in parallel (much faster than sequential)
+          // 250ms delay to avoid rate limiting
+          const [created, status, temp, transfer] = await Promise.all([
+            fetchLogsChunked(
+              packageCreatedEvent,
+              startBlock,
+              currentBlock,
+              999n,
+              250  // 250ms delay to avoid rate limiting
+            ),
+            fetchLogsChunked(
+              packageStatusUpdatedEvent,
+              startBlock,
+              currentBlock,
+              999n,
+              250
+            ),
+            temperatureUpdatedEvent
+              ? fetchLogsChunked(
+                  temperatureUpdatedEvent,
+                  startBlock,
+                  currentBlock,
+                  999n,
+                  250
+                )
+              : Promise.resolve([]),
+            packageTransferredEvent
+              ? fetchLogsChunked(
+                  packageTransferredEvent,
+                  startBlock,
+                  currentBlock,
+                  999n,
+                  250
+                )
+              : Promise.resolve([]),
+          ]);
+          
+          newCreatedLogs = created;
+          newStatusLogs = status;
+          newTemperatureLogs = temp;
+          newTransferLogs = transfer;
+        }
       }
 
       // Combine cached and new raw logs
@@ -448,13 +883,28 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
         ? newStatusLogs
         : cachedStatusLogs;
 
+      const allTemperatureLogs = startBlock === deploymentBlock && cachedTemperatureLogs.length > 0
+        ? [...cachedTemperatureLogs, ...newTemperatureLogs]
+        : newTemperatureLogs.length > 0
+        ? newTemperatureLogs
+        : cachedTemperatureLogs;
+
+      const allTransferLogs = startBlock === deploymentBlock && cachedTransferLogs.length > 0
+        ? [...cachedTransferLogs, ...newTransferLogs]
+        : newTransferLogs.length > 0
+        ? newTransferLogs
+        : cachedTransferLogs;
+
       logger.debug('Total events', {
         createdCount: allCreatedLogs.length,
         statusCount: allStatusLogs.length,
+        temperatureCount: allTemperatureLogs.length,
         newCreatedCount: newCreatedLogs.length,
         newStatusCount: newStatusLogs.length,
+        newTemperatureCount: newTemperatureLogs.length,
         cachedCreatedCount: cachedCreatedLogs.length,
         cachedStatusCount: cachedStatusLogs.length,
+        cachedTemperatureCount: cachedTemperatureLogs.length,
       });
 
       logger.info('Raw logs summary', {
@@ -470,6 +920,8 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
       // Use the full ABI array, not just the event definition
       let createdEvents: any[] = [];
       let statusEvents: any[] = [];
+      let temperatureEvents: any[] = [];
+      let transferEvents: any[] = [];
       
       if (allCreatedLogs.length > 0) {
         try {
@@ -514,6 +966,48 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
         }
       }
 
+      if (allTemperatureLogs.length > 0) {
+        try {
+          temperatureEvents = parseEventLogs({
+            abi: abi as any,
+            eventName: 'TemperatureUpdated',
+            logs: allTemperatureLogs,
+            strict: false,
+          }) as any[];
+          logger.info('Parsed TemperatureUpdated events', { 
+            count: temperatureEvents.length,
+            rawLogsCount: allTemperatureLogs.length,
+          });
+        } catch (err: any) {
+          logger.error('Error parsing TemperatureUpdated events', err, {
+            logsCount: allTemperatureLogs.length,
+            error: err?.message || String(err),
+          });
+        }
+      }
+
+      if (allTransferLogs.length > 0) {
+        try {
+          // Parse PackageTransferred events to track ownership changes
+          const parsedTransferEvents = parseEventLogs({
+            abi: abi as any,
+            eventName: 'PackageTransferred',
+            logs: allTransferLogs,
+            strict: false,
+          }) as any[];
+          transferEvents = parsedTransferEvents;
+          logger.info('Parsed PackageTransferred events', { 
+            count: transferEvents.length,
+            rawLogsCount: allTransferLogs.length,
+          });
+        } catch (err: any) {
+          logger.error('Error parsing PackageTransferred events', err, {
+            logsCount: allTransferLogs.length,
+            error: err?.message || String(err),
+          });
+        }
+      }
+
       // Cache the raw logs (not parsed events) for future use
       if (startBlock === deploymentBlock) {
         // Full refresh - cache all raw logs
@@ -527,13 +1021,20 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
           ttl: 24 * 60 * 60 * 1000, // 24 hours
           persist: true,
         });
-      } else if (newCreatedLogs.length > 0 || newStatusLogs.length > 0) {
+        await cacheService.set(CACHE_KEYS.TEMPERATURE_EVENTS, allTemperatureLogs, {
+          namespace: 'packages',
+          ttl: 24 * 60 * 60 * 1000, // 24 hours
+          persist: true,
+        });
+      } else if (newCreatedLogs.length > 0 || newStatusLogs.length > 0 || newTemperatureLogs.length > 0) {
         // Incremental update - merge with cached raw logs
         const cachedCreated = await cacheService.get(CACHE_KEYS.CREATED_EVENTS, 'packages') as any[] | null;
         const cachedStatus = await cacheService.get(CACHE_KEYS.STATUS_EVENTS, 'packages') as any[] | null;
+        const cachedTemperature = await cacheService.get(CACHE_KEYS.TEMPERATURE_EVENTS, 'packages') as any[] | null;
         
         const mergedCreated = [...(cachedCreated || []), ...newCreatedLogs];
         const mergedStatus = [...(cachedStatus || []), ...newStatusLogs];
+        const mergedTemperature = [...(cachedTemperature || []), ...newTemperatureLogs];
         
         await cacheService.set(CACHE_KEYS.CREATED_EVENTS, mergedCreated, {
           namespace: 'packages',
@@ -541,6 +1042,11 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
           persist: true,
         });
         await cacheService.set(CACHE_KEYS.STATUS_EVENTS, mergedStatus, {
+          namespace: 'packages',
+          ttl: 24 * 60 * 60 * 1000,
+          persist: true,
+        });
+        await cacheService.set(CACHE_KEYS.TEMPERATURE_EVENTS, mergedTemperature, {
           namespace: 'packages',
           ttl: 24 * 60 * 60 * 1000,
           persist: true,
@@ -570,8 +1076,45 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
         }
       }
 
+      // Build a map of packageId -> latest owner (from PackageTransferred events)
+      // This is critical - the contract requires msg.sender == pkg.currentOwner
+      const ownerMap = new Map<bigint, { owner: string; timestamp: bigint }>();
+      for (const event of transferEvents) {
+        if (event.args && 'id' in event.args && 'to' in event.args && 'timestamp' in event.args) {
+          const id = event.args.id as bigint;
+          const to = event.args.to as string;
+          const timestamp = event.args.timestamp as bigint;
+          
+          // Keep only the latest transfer (most recent owner)
+          const existing = ownerMap.get(id);
+          if (!existing || timestamp > existing.timestamp) {
+            ownerMap.set(id, { owner: to, timestamp });
+          }
+        }
+      }
+
+      // Build a map of packageId -> latest temperature update
+      const temperatureMap = new Map<bigint, { temperature: number; timestamp: bigint }>();
+      for (const event of temperatureEvents) {
+        if (event.args && 'id' in event.args && 'newTemperature' in event.args && 'timestamp' in event.args) {
+          const id = event.args.id as bigint;
+          const newTemperature = event.args.newTemperature as bigint | number;
+          const timestamp = event.args.timestamp as bigint;
+          
+          // Convert temperature to number (int8 from blockchain)
+          const tempValue = typeof newTemperature === 'bigint' ? Number(newTemperature) : newTemperature;
+          
+          // Keep only the latest temperature update for each package
+          const existing = temperatureMap.get(id);
+          if (!existing || timestamp > existing.timestamp) {
+            temperatureMap.set(id, { temperature: tempValue, timestamp });
+          }
+        }
+      }
+
       // Build packages from created events
-      const packagesMap = new Map<string, ParsedPackage>();
+      // Start with existing packages to preserve them during incremental updates
+      const packagesMap = new Map<string, ParsedPackage>(packages);
       for (const event of createdEvents) {
         if (event.args && 'id' in event.args && 'description' in event.args && 'creator' in event.args && 'timestamp' in event.args) {
           const id = event.args.id as bigint;
@@ -582,9 +1125,18 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
           // Get latest status update for this package
           const statusUpdate = statusMap.get(id);
           
+          // Get latest owner from transfer events (if transferred), otherwise use creator
+          const ownerUpdate = ownerMap.get(id);
+          const currentOwner = ownerUpdate ? ownerUpdate.owner : creator;
+          
+          // Get latest temperature update for this package
+          const temperatureUpdate = temperatureMap.get(id);
+          
           const parsedPackage = formatPackageFromEvents(
             { id, description, creator, timestamp },
-            statusUpdate ? { newStatus: statusUpdate.newStatus, timestamp: statusUpdate.timestamp } : undefined
+            statusUpdate ? { newStatus: statusUpdate.newStatus, timestamp: statusUpdate.timestamp } : undefined,
+            temperatureUpdate ? temperatureUpdate.temperature : undefined,
+            currentOwner // Pass the current owner (from transfers or creator)
           );
 
           packagesMap.set(parsedPackage.id, parsedPackage);
@@ -605,11 +1157,19 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
           blocksSearched: (currentBlock - startBlock).toString(),
           contractAddress,
           suggestion: 'Check if contract address is correct or if deployment block is set properly',
-        });
-      }
+      });
+    }
       
-      // Update packages state - this will trigger the useEffect to notify parent
-      setPackages(packagesMap);
+      // Update packages state - merge with existing to preserve packages not in current fetch
+      // This is important for incremental updates where we only fetch recent blocks
+      setPackages(prev => {
+        const merged = new Map(prev);
+        // Add/update packages from current fetch (newer data takes precedence)
+        packagesMap.forEach((pkg, id) => {
+          merged.set(id, pkg);
+      });
+        return merged;
+      });
     } catch (err: any) {
       const errorMessage = err?.message || String(err);
       logger.error('Error fetching packages from events', err, {
@@ -623,9 +1183,41 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     }
   }, [publicClient, contractAddress, abi]);
 
+  // Reset state when contract address changes (e.g., network switch)
+  useEffect(() => {
+    if (contractAddress && lastContractAddressRef.current !== contractAddress) {
+      logger.info('Contract address changed, resetting packages state', {
+        oldAddress: lastContractAddressRef.current,
+        newAddress: contractAddress,
+      });
+      // Clear packages when contract address changes (different network)
+      setPackages(new Map());
+      lastPackagesRef.current = '';
+      lastFetchTimeRef.current = 0;
+      setIsLoading(true);
+      lastContractAddressRef.current = contractAddress;
+    } else if (!lastContractAddressRef.current && contractAddress) {
+      // First time contract address is set
+      lastContractAddressRef.current = contractAddress;
+    }
+  }, [contractAddress]);
+
   // Fetch packages when contract address or public client changes
   useEffect(() => {
-    fetchPackagesFromEvents();
+    // Only fetch if we have both publicClient and contractAddress
+    if (publicClient && contractAddress) {
+      logger.info('Triggering package fetch due to contract address or public client change', {
+        contractAddress,
+        hasPublicClient: !!publicClient,
+      });
+      fetchPackagesFromEvents();
+    } else {
+      logger.debug('Skipping package fetch - missing dependencies', {
+        hasPublicClient: !!publicClient,
+        contractAddress,
+      });
+      setIsLoading(false);
+    }
     
     // Cleanup debounce timer on unmount
     return () => {
@@ -633,7 +1225,7 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
         clearTimeout(fetchDebounceTimerRef.current);
       }
     };
-  }, [fetchPackagesFromEvents]);
+  }, [fetchPackagesFromEvents, publicClient, contractAddress]);
 
   // Debug logging
   useEffect(() => {
@@ -646,16 +1238,21 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     });
   }, [contractAddress, totalPackages, totalPackagesError, packages.size, isLoading]);
 
-  // Notify parent when packages change
+  // Notify parent when packages change (with debouncing to prevent infinite loops)
   useEffect(() => {
-    const packagesArray = Array.from(packages.values());
+    // Prevent concurrent execution
+    if (isNotifyingRef.current) {
+      logger.debug('Notification already in progress, skipping');
+      return;
+    }
     
-    logger.debug('Packages changed', { 
-      packagesCount: packagesArray.length, 
-      packageIds: packagesArray.map(p => p.id),
-      lastKey: lastPackagesRef.current,
-      isLoading,
-    });
+    // Clear any pending notification
+    if (notifyParentTimerRef.current) {
+      clearTimeout(notifyParentTimerRef.current);
+      notifyParentTimerRef.current = null;
+    }
+    
+    const packagesArray = Array.from(packages.values());
     
     // Progressive loading: notify parent even while loading so packages appear as they're found
     // Only skip if we have no packages and are still loading (initial state)
@@ -667,21 +1264,45 @@ export function PackagesFetcher({ onPackagesLoaded }: PackagesFetcherProps) {
     // Create a stable string representation to compare
     const packagesKey = packagesArray.map(p => `${p.id}:${p.status}`).sort().join('|');
     
-    // Only call onPackagesLoaded if packages actually changed
-    // Always call on initial load (when ref is empty) or when packages change
+    // Only notify if packages actually changed
     if (lastPackagesRef.current === '' || packagesKey !== lastPackagesRef.current) {
-      logger.info('Notifying parent of packages', { 
-        count: packagesArray.length, 
-        packagesKey,
-        isLoading,
-        note: isLoading ? 'Progressive update while loading' : 'Final update',
-      });
-      lastPackagesRef.current = packagesKey;
-      onPackagesLoaded(packagesArray);
+      // Debounce the notification to prevent rapid-fire updates during progressive loading
+      const debounceDelay = isLoading ? 1000 : 200; // Increased delay to prevent loops
+      
+      isNotifyingRef.current = true;
+      notifyParentTimerRef.current = setTimeout(() => {
+        try {
+          logger.info('Notifying parent of packages', { 
+            count: packagesArray.length, 
+            packagesKey,
+            isLoading,
+            note: isLoading ? 'Progressive update while loading' : 'Final update',
+          });
+          lastPackagesRef.current = packagesKey;
+          stableOnPackagesLoaded(packagesArray);
+        } catch (error: any) {
+          logger.error('Error notifying parent of packages', error, {
+            packagesKey,
+            errorMessage: error?.message || String(error),
+          });
+        } finally {
+          isNotifyingRef.current = false;
+          notifyParentTimerRef.current = null;
+        }
+      }, debounceDelay);
     } else {
       logger.debug('Packages unchanged, skipping notification', { packagesKey });
     }
-  }, [packages, onPackagesLoaded, isLoading]);
+    
+    // Cleanup timer on unmount or dependency change
+    return () => {
+      if (notifyParentTimerRef.current) {
+        clearTimeout(notifyParentTimerRef.current);
+        notifyParentTimerRef.current = null;
+      }
+      isNotifyingRef.current = false;
+    };
+  }, [packages, stableOnPackagesLoaded, isLoading]);
 
   // Component doesn't render anything, it just fetches and notifies parent
   return null;

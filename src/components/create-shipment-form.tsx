@@ -11,7 +11,7 @@ import {
   CheckCircle2,
   X,
 } from "lucide-react";
-import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useWriteContract, useWaitForTransactionReceipt, usePublicClient, useAccount } from "wagmi";
 import { useContractAddress } from "../hooks/useContract";
 import { getContractABI } from "../config/contracts";
 import { Address } from "viem";
@@ -46,10 +46,15 @@ export function CreateShipmentForm({
 
   const contractAddress = useContractAddress();
   const abi = getContractABI();
+  const publicClient = usePublicClient();
+  const { address: accountAddress } = useAccount();
   const { writeContract, isPending, data: writeData } = useWriteContract();
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
     hash: writeData,
   });
+  
+  // Network gas limit cap (Sepolia and most networks use 16,777,216)
+  const MAX_GAS_LIMIT = 16777216n;
 
   // Validation function
   const validateField = (name: string, value: string): string => {
@@ -155,11 +160,38 @@ export function CreateShipmentForm({
     try {
       // Reset processed transaction hash when starting a new transaction
       processedTxHashRef.current = null;
+      
+      if (!publicClient || !accountAddress) {
+        toast.error("Wallet not connected");
+        return;
+      }
+      
+      // Estimate gas first and cap it to network maximum
+      let gasLimit: bigint | undefined;
+      try {
+        const estimatedGas = await publicClient.estimateContractGas({
+          address: contractAddress as Address,
+          abi,
+          functionName: "createPackage",
+          args: [fullDescription],
+          account: accountAddress as Address,
+        });
+        
+        // Apply 20% buffer but cap at network maximum
+        const bufferedGas = (estimatedGas * 120n) / 100n;
+        gasLimit = bufferedGas > MAX_GAS_LIMIT ? MAX_GAS_LIMIT : bufferedGas;
+      } catch (gasError: any) {
+        // If gas estimation fails, use a safe default (but still cap it)
+        console.warn('Gas estimation failed, using capped default', gasError);
+        gasLimit = MAX_GAS_LIMIT;
+      }
+      
       writeContract({
         address: contractAddress as Address,
         abi,
         functionName: "createPackage",
         args: [fullDescription],
+        gas: gasLimit,
       });
     } catch (error: any) {
       toast.error("Failed to create shipment: " + (error.message || String(error)));

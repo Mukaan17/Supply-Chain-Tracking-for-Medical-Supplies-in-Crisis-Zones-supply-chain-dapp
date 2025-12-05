@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, ReactNode } from 'react';
 
 export interface Notification {
   id: string;
@@ -58,18 +58,23 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   const unreadCount = notifications.filter((n) => !readIds.has(n.id)).length;
 
+  // Memoize the context value to prevent unnecessary re-renders
+  // This is critical to prevent infinite loops when components depend on this context
+  const contextValue = useMemo(
+    () => ({
+      notifications,
+      addNotification,
+      removeNotification,
+      clearAllNotifications,
+      unreadCount,
+      markAsRead,
+      markAllAsRead,
+    }),
+    [notifications, addNotification, removeNotification, clearAllNotifications, unreadCount, markAsRead, markAllAsRead]
+  );
+
   return (
-    <NotificationContext.Provider
-      value={{
-        notifications,
-        addNotification,
-        removeNotification,
-        clearAllNotifications,
-        unreadCount,
-        markAsRead,
-        markAllAsRead,
-      }}
-    >
+    <NotificationContext.Provider value={contextValue}>
       {children}
     </NotificationContext.Provider>
   );
